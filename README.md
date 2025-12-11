@@ -26,25 +26,14 @@ Add to your `opencode.json`:
 }
 ```
 
-### Plugin Options
+### Defaults
 
-```json
-{
-  "plugin": [
-    ["opencode-workflows", {
-      "workflowDirs": [".opencode/workflows"],
-      "dbPath": ".opencode/data/workflows.db",
-      "verbose": false
-    }]
-  ]
-}
-```
+The plugin uses the following defaults:
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `workflowDirs` | `string[]` | `[".opencode/workflows"]` | Directories to scan for workflow JSON files |
-| `dbPath` | `string` | `".opencode/data/workflows.db"` | Path to SQLite database for persisting workflow runs |
-| `verbose` | `boolean` | `false` | Enable verbose logging |
+| Setting | Default | Description |
+|---------|---------|-------------|
+| Workflow directory | `.opencode/workflows` | Directory scanned for workflow JSON files |
+| Database path | `.opencode/data/workflows.db` | SQLite database for persisting workflow runs |
 
 ### Persistence
 
