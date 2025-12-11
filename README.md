@@ -12,12 +12,6 @@ Workflow automation plugin for OpenCode using the Mastra workflow engine. Define
 
 ## Installation
 
-```bash
-npm install opencode-workflows
-```
-
-## Installation
-
 Install the plugin in your project's `.opencode/plugin` directory:
 
 ```bash
