@@ -304,14 +304,49 @@ Modes:
 // Also export as default for backwards compatibility
 export default WorkflowPlugin;
 
-// Re-export types for consumers
-export * from "./types.js";
-export { loadWorkflows, createLogger } from "./loader/index.js";
-export { WorkflowFactory } from "./factory/index.js";
-export { WorkflowRunner, handleWorkflowCommand, WorkflowStorage } from "./commands/index.js";
-export {
-  WorkflowToolSchema,
-  executeWorkflowTool,
-  getWorkflowToolDefinition,
-  type WorkflowToolInput,
-} from "./tools/index.js";
+// IMPORTANT: Only export the plugin function from the main entry point.
+// OpenCode's plugin loader iterates over ALL exports and tries to call each
+// one as a function. Exporting objects, classes, or Zod schemas here will
+// cause runtime errors like "fn3 is not a function".
+//
+// For utility exports (types, classes, functions), consumers should import
+// from the /utils subpath:
+//   import { WorkflowFactory, loadWorkflows } from "opencode-workflows/utils"
+//
+// TypeScript types are safe to export since they're erased at runtime.
+export type {
+  JsonPrimitive,
+  JsonValue,
+  JsonObject,
+  InputValue,
+  WorkflowInputs,
+  WorkflowPluginConfig,
+  StepType,
+  HttpMethod,
+  FileAction,
+  BaseStepDefinition,
+  ShellStepDefinition,
+  ToolStepDefinition,
+  AgentStepDefinition,
+  SuspendStepDefinition,
+  HttpStepDefinition,
+  FileStepDefinition,
+  StepDefinition,
+  WorkflowDefinition,
+  WorkflowRunStatus,
+  ShellStepOutput,
+  ToolStepOutput,
+  AgentStepOutput,
+  SuspendStepOutput,
+  HttpStepOutput,
+  FileStepOutput,
+  StepOutput,
+  StepResult,
+  WorkflowRun,
+  StepExecutionContext,
+  OpencodeClient,
+  ShellExecutor,
+  Logger,
+  WorkflowEventPayload,
+  WorkflowRegistry,
+} from "./types.js";

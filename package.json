@@ -6,8 +6,8 @@
   "types": "dist/index.d.ts",
   "type": "module",
   "scripts": {
-    "build": "tsup src/index.ts --format esm --dts",
-    "dev": "tsup src/index.ts --format esm --dts --watch",
+    "build": "tsup src/index.ts src/utils.ts --format esm --dts",
+    "dev": "tsup src/index.ts src/utils.ts --format esm --dts --watch",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest"
@@ -32,7 +32,7 @@
   "dependencies": {
     "@mastra/core": "^0.24.0",
     "@mastra/libsql": "^0.16.0",
-    "@opencode-ai/plugin": "^1.0.146",
+    "@opencode-ai/plugin": "^1.0.147",
     "strip-json-comments": "^5.0.3",
     "zod": "^3.25.0"
   },
@@ -58,6 +58,10 @@
     ".": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
+    },
+    "./utils": {
+      "import": "./dist/utils.js",
+      "types": "./dist/utils.d.ts"
     }
   }
 }
