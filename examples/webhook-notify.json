@@ -1,0 +1,53 @@
+{
+  "id": "webhook-notify",
+  "name": "Webhook Notification",
+  "description": "Demonstrates HTTP step for sending notifications to external services",
+  "version": "1.0.0",
+  "tags": ["http", "notifications"],
+  "inputs": {
+    "message": "string",
+    "channel": "string"
+  },
+  "steps": [
+    {
+      "id": "get-git-info",
+      "type": "shell",
+      "command": "git log -1 --format='%h - %s (%an)'",
+      "description": "Get latest commit info"
+    },
+    {
+      "id": "notify-slack",
+      "type": "http",
+      "method": "POST",
+      "url": "{{env.SLACK_WEBHOOK_URL}}",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "channel": "{{inputs.channel}}",
+        "text": "{{inputs.message}}",
+        "attachments": [
+          {
+            "color": "#36a64f",
+            "fields": [
+              {
+                "title": "Latest Commit",
+                "value": "{{steps.get-git-info.stdout}}",
+                "short": false
+              }
+            ]
+          }
+        ]
+      },
+      "description": "Send notification to Slack",
+      "after": ["get-git-info"]
+    },
+    {
+      "id": "log-result",
+      "type": "agent",
+      "prompt": "The Slack notification returned status {{steps.notify-slack.status}}. Summarize whether it was successful and what was sent.",
+      "description": "Summarize notification result",
+      "after": ["notify-slack"]
+    }
+  ]
+}

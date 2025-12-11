@@ -1,10 +1,24 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { OpencodeClient } from "../types.js";
 
-// Mock child_process before importing steps
+// Use vi.hoisted to create mocks that can be used in vi.mock factories
+const { mockExecAsync } = vi.hoisted(() => ({
+  mockExecAsync: vi.fn(),
+}));
+
+// Mock child_process - needs to work with promisify
 vi.mock("node:child_process", () => ({
   exec: vi.fn(),
 }));
+
+// Mock node:util to return our async mock when promisify is called with exec
+vi.mock("node:util", async (importOriginal) => {
+  const original = await importOriginal<typeof import("node:util")>();
+  return {
+    ...original,
+    promisify: () => mockExecAsync,
+  };
+});
 
 vi.mock("node:fs/promises", () => ({
   readFile: vi.fn(),
@@ -30,8 +44,17 @@ import {
   createHttpStep,
   createFileStep,
 } from "./steps.js";
-import { exec } from "node:child_process";
 import { readFile, writeFile, unlink } from "node:fs/promises";
+
+// Helper to simulate successful exec - works with the promisified version
+function mockExecSuccess(stdout: string, stderr = "") {
+  mockExecAsync.mockResolvedValue({ stdout, stderr });
+}
+
+function mockExecError(code: number, stderr: string, stdout = "") {
+  const error = Object.assign(new Error(stderr), { code, stdout, stderr });
+  mockExecAsync.mockRejectedValue(error);
+}
 
 describe("Step Adapters", () => {
   let mockClient: OpencodeClient;
@@ -288,11 +311,243 @@ describe("Step Adapters", () => {
         } as unknown as Parameters<typeof step.execute>[0]);
 
         expect(result).toEqual(previousResult);
-        expect(exec).not.toHaveBeenCalled();
+        expect(mockExecAsync).not.toHaveBeenCalled();
         expect(mockClient.app.log).toHaveBeenCalledWith(
           "Skipping already-completed step: build-step",
           "info"
         );
+      });
+    });
+
+    describe("command execution", () => {
+      it("should execute command and return stdout/stderr", async () => {
+        mockExecSuccess("output text", "warning text");
+        const step = createShellStep(
+          { id: "cmd", type: "shell", command: "echo hello" },
+          mockClient
+        );
+
+        const result = await step.execute({
+          inputData: { inputs: {}, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result).toEqual({
+          stdout: "output text",
+          stderr: "warning text",
+          exitCode: 0,
+        });
+        expect(mockExecAsync).toHaveBeenCalled();
+      });
+
+      it("should interpolate variables in command", async () => {
+        mockExecSuccess("done");
+        const step = createShellStep(
+          { id: "cmd", type: "shell", command: "deploy {{inputs.env}}" },
+          mockClient
+        );
+
+        await step.execute({
+          inputData: { inputs: { env: "production" }, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(mockExecAsync).toHaveBeenCalledWith(
+          "deploy production",
+          expect.any(Object)
+        );
+      });
+
+      it("should use step results in interpolation", async () => {
+        mockExecSuccess("deployed");
+        const step = createShellStep(
+          { id: "deploy", type: "shell", command: "deploy {{steps.build.artifact}}" },
+          mockClient
+        );
+
+        await step.execute({
+          inputData: {
+            inputs: {},
+            steps: { build: { artifact: "app.zip", exitCode: 0 } },
+          },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(mockExecAsync).toHaveBeenCalledWith(
+          "deploy app.zip",
+          expect.any(Object)
+        );
+      });
+
+      it("should pass cwd option when specified", async () => {
+        mockExecSuccess("done");
+        const step = createShellStep(
+          { id: "cmd", type: "shell", command: "ls", cwd: "/tmp" },
+          mockClient
+        );
+
+        await step.execute({
+          inputData: { inputs: {}, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(mockExecAsync).toHaveBeenCalledWith(
+          "ls",
+          expect.objectContaining({ cwd: "/tmp" })
+        );
+      });
+
+      it("should pass interpolated cwd option", async () => {
+        mockExecSuccess("done");
+        const step = createShellStep(
+          { id: "cmd", type: "shell", command: "ls", cwd: "{{inputs.dir}}" },
+          mockClient
+        );
+
+        await step.execute({
+          inputData: { inputs: { dir: "/home/user" }, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(mockExecAsync).toHaveBeenCalledWith(
+          "ls",
+          expect.objectContaining({ cwd: "/home/user" })
+        );
+      });
+
+      it("should merge env variables", async () => {
+        mockExecSuccess("done");
+        const step = createShellStep(
+          {
+            id: "cmd",
+            type: "shell",
+            command: "echo $MY_VAR",
+            env: { MY_VAR: "value", INTERP: "{{inputs.val}}" },
+          },
+          mockClient
+        );
+
+        await step.execute({
+          inputData: { inputs: { val: "interpolated" }, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(mockExecAsync).toHaveBeenCalledWith(
+          "echo $MY_VAR",
+          expect.objectContaining({
+            env: expect.objectContaining({
+              MY_VAR: "value",
+              INTERP: "interpolated",
+            }),
+          })
+        );
+      });
+
+      it("should pass timeout option when specified", async () => {
+        mockExecSuccess("done");
+        const step = createShellStep(
+          { id: "cmd", type: "shell", command: "long-task", timeout: 5000 },
+          mockClient
+        );
+
+        await step.execute({
+          inputData: { inputs: {}, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(mockExecAsync).toHaveBeenCalledWith(
+          "long-task",
+          expect.objectContaining({ timeout: 5000 })
+        );
+      });
+    });
+
+    describe("error handling", () => {
+      it("should throw error when command fails with failOnError=true (default)", async () => {
+        mockExecError(1, "command failed");
+        const step = createShellStep(
+          { id: "cmd", type: "shell", command: "fail" },
+          mockClient
+        );
+
+        await expect(
+          step.execute({
+            inputData: { inputs: {}, steps: {} },
+          } as unknown as Parameters<typeof step.execute>[0])
+        ).rejects.toThrow("Command failed with exit code 1");
+      });
+
+      it("should return error output when failOnError=false", async () => {
+        mockExecError(127, "not found", "partial output");
+        const step = createShellStep(
+          { id: "cmd", type: "shell", command: "missing-cmd", failOnError: false },
+          mockClient
+        );
+
+        const result = await step.execute({
+          inputData: { inputs: {}, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result).toEqual({
+          stdout: "partial output",
+          stderr: "not found",
+          exitCode: 127,
+        });
+      });
+    });
+
+    describe("condition evaluation", () => {
+      it("should skip execution when condition is false", async () => {
+        const step = createShellStep(
+          { id: "cmd", type: "shell", command: "risky", condition: "{{inputs.run}}" },
+          mockClient
+        );
+
+        const result = await step.execute({
+          inputData: { inputs: { run: "false" }, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result).toEqual({
+          stdout: "",
+          stderr: "Skipped due to condition",
+          exitCode: 0,
+          skipped: true,
+        });
+        expect(mockExecAsync).not.toHaveBeenCalled();
+      });
+
+      it("should execute when condition is true", async () => {
+        mockExecSuccess("executed");
+        const step = createShellStep(
+          { id: "cmd", type: "shell", command: "safe", condition: "{{inputs.run}}" },
+          mockClient
+        );
+
+        const result = await step.execute({
+          inputData: { inputs: { run: "true" }, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result.stdout).toBe("executed");
+        expect(mockExecAsync).toHaveBeenCalled();
+      });
+
+      it("should skip when condition evaluates to empty string", async () => {
+        const step = createShellStep(
+          { id: "cmd", type: "shell", command: "test", condition: "{{inputs.empty}}" },
+          mockClient
+        );
+
+        const result = await step.execute({
+          inputData: { inputs: { empty: "" }, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result.skipped).toBe(true);
+      });
+
+      it("should skip when condition evaluates to 0", async () => {
+        const step = createShellStep(
+          { id: "cmd", type: "shell", command: "test", condition: "{{inputs.zero}}" },
+          mockClient
+        );
+
+        const result = await step.execute({
+          inputData: { inputs: { zero: "0" }, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result.skipped).toBe(true);
       });
     });
   });
@@ -334,6 +589,108 @@ describe("Step Adapters", () => {
         );
       });
     });
+
+    describe("tool execution", () => {
+      it("should execute tool and return result", async () => {
+        const step = createToolStep(
+          { id: "tool", type: "tool", tool: "testTool", args: { data: "test" } },
+          mockClient
+        );
+
+        const result = await step.execute({
+          inputData: { inputs: {}, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result).toEqual({ result: { success: true } });
+        expect(mockClient.tools.testTool.execute).toHaveBeenCalledWith({ data: "test" });
+      });
+
+      it("should interpolate args", async () => {
+        const step = createToolStep(
+          {
+            id: "tool",
+            type: "tool",
+            tool: "testTool",
+            args: { path: "{{inputs.filePath}}", count: "{{inputs.num}}" },
+          },
+          mockClient
+        );
+
+        await step.execute({
+          inputData: { inputs: { filePath: "/tmp/file.txt", num: 42 }, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(mockClient.tools.testTool.execute).toHaveBeenCalledWith({
+          path: "/tmp/file.txt",
+          count: 42,
+        });
+      });
+
+      it("should use step results in args", async () => {
+        const step = createToolStep(
+          {
+            id: "tool",
+            type: "tool",
+            tool: "testTool",
+            args: { content: "{{steps.read.content}}" },
+          },
+          mockClient
+        );
+
+        await step.execute({
+          inputData: {
+            inputs: {},
+            steps: { read: { content: "file contents" } },
+          },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(mockClient.tools.testTool.execute).toHaveBeenCalledWith({
+          content: "file contents",
+        });
+      });
+
+      it("should throw error for missing tool", async () => {
+        const step = createToolStep(
+          { id: "tool", type: "tool", tool: "unknownTool", args: {} },
+          mockClient
+        );
+
+        await expect(
+          step.execute({
+            inputData: { inputs: {}, steps: {} },
+          } as unknown as Parameters<typeof step.execute>[0])
+        ).rejects.toThrow("Tool 'unknownTool' not found");
+      });
+
+      it("should execute without args", async () => {
+        const step = createToolStep(
+          { id: "tool", type: "tool", tool: "testTool" },
+          mockClient
+        );
+
+        await step.execute({
+          inputData: { inputs: {}, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(mockClient.tools.testTool.execute).toHaveBeenCalledWith({});
+      });
+    });
+
+    describe("condition evaluation", () => {
+      it("should skip when condition is false", async () => {
+        const step = createToolStep(
+          { id: "tool", type: "tool", tool: "testTool", condition: "{{inputs.run}}" },
+          mockClient
+        );
+
+        const result = await step.execute({
+          inputData: { inputs: { run: "false" }, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result).toEqual({ result: null, skipped: true });
+        expect(mockClient.tools.testTool.execute).not.toHaveBeenCalled();
+      });
+    });
   });
 
   // =============================================================================
@@ -372,6 +729,129 @@ describe("Step Adapters", () => {
         );
       });
     });
+
+    describe("agent execution", () => {
+      it("should call LLM with prompt and return response", async () => {
+        const step = createAgentStep(
+          { id: "agent", type: "agent", prompt: "Summarize this" },
+          mockClient
+        );
+
+        const result = await step.execute({
+          inputData: { inputs: {}, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result).toEqual({ response: "LLM response" });
+        expect(mockClient.llm.chat).toHaveBeenCalledWith({
+          model: undefined,
+          messages: [{ role: "user", content: "Summarize this" }],
+          maxTokens: undefined,
+        });
+      });
+
+      it("should interpolate prompt", async () => {
+        const step = createAgentStep(
+          { id: "agent", type: "agent", prompt: "Review: {{inputs.code}}" },
+          mockClient
+        );
+
+        await step.execute({
+          inputData: { inputs: { code: "const x = 1" }, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(mockClient.llm.chat).toHaveBeenCalledWith(
+          expect.objectContaining({
+            messages: expect.arrayContaining([
+              { role: "user", content: "Review: const x = 1" },
+            ]),
+          })
+        );
+      });
+
+      it("should include system prompt when provided", async () => {
+        const step = createAgentStep(
+          {
+            id: "agent",
+            type: "agent",
+            prompt: "What is 2+2?",
+            system: "You are a math tutor.",
+          },
+          mockClient
+        );
+
+        await step.execute({
+          inputData: { inputs: {}, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(mockClient.llm.chat).toHaveBeenCalledWith(
+          expect.objectContaining({
+            messages: [
+              { role: "system", content: "You are a math tutor." },
+              { role: "user", content: "What is 2+2?" },
+            ],
+          })
+        );
+      });
+
+      it("should pass model and maxTokens config", async () => {
+        const step = createAgentStep(
+          {
+            id: "agent",
+            type: "agent",
+            prompt: "Hello",
+            model: "gpt-4",
+            maxTokens: 500,
+          },
+          mockClient
+        );
+
+        await step.execute({
+          inputData: { inputs: {}, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(mockClient.llm.chat).toHaveBeenCalledWith({
+          model: "gpt-4",
+          messages: [{ role: "user", content: "Hello" }],
+          maxTokens: 500,
+        });
+      });
+
+      it("should use step results in prompt", async () => {
+        const step = createAgentStep(
+          { id: "agent", type: "agent", prompt: "Error: {{steps.build.stderr}}" },
+          mockClient
+        );
+
+        await step.execute({
+          inputData: {
+            inputs: {},
+            steps: { build: { stdout: "", stderr: "Build failed", exitCode: 1 } },
+          },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(mockClient.llm.chat).toHaveBeenCalledWith(
+          expect.objectContaining({
+            messages: [{ role: "user", content: "Error: Build failed" }],
+          })
+        );
+      });
+    });
+
+    describe("condition evaluation", () => {
+      it("should skip when condition is false", async () => {
+        const step = createAgentStep(
+          { id: "agent", type: "agent", prompt: "Analyze", condition: "{{inputs.run}}" },
+          mockClient
+        );
+
+        const result = await step.execute({
+          inputData: { inputs: { run: "false" }, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result).toEqual({ response: "", skipped: true });
+        expect(mockClient.llm.chat).not.toHaveBeenCalled();
+      });
+    });
   });
 
   // =============================================================================
@@ -383,7 +863,7 @@ describe("Step Adapters", () => {
         ok: true,
         status: 200,
         text: () => Promise.resolve('{"data":"response"}'),
-        headers: new Map([["content-type", "application/json"]]),
+        headers: new Headers([["content-type", "application/json"]]),
       });
     });
 
@@ -413,6 +893,213 @@ describe("Step Adapters", () => {
         } as unknown as Parameters<typeof step.execute>[0]);
 
         expect(result).toEqual(previousResult);
+        expect(global.fetch).not.toHaveBeenCalled();
+      });
+    });
+
+    describe("HTTP request execution", () => {
+      it("should make HTTP request and return response", async () => {
+        const step = createHttpStep({
+          id: "http",
+          type: "http",
+          method: "GET",
+          url: "https://api.example.com/data",
+        });
+
+        const result = await step.execute({
+          inputData: { inputs: {}, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result.status).toBe(200);
+        expect(result.body).toEqual({ data: "response" });
+        expect(result.text).toBe('{"data":"response"}');
+        expect(global.fetch).toHaveBeenCalledWith("https://api.example.com/data", {
+          method: "GET",
+          headers: {},
+          body: undefined,
+        });
+      });
+
+      it("should interpolate URL", async () => {
+        const step = createHttpStep({
+          id: "http",
+          type: "http",
+          method: "GET",
+          url: "https://api.example.com/{{inputs.endpoint}}",
+        });
+
+        await step.execute({
+          inputData: { inputs: { endpoint: "users/123" }, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(global.fetch).toHaveBeenCalledWith(
+          "https://api.example.com/users/123",
+          expect.any(Object)
+        );
+      });
+
+      it("should send headers", async () => {
+        const step = createHttpStep({
+          id: "http",
+          type: "http",
+          method: "POST",
+          url: "https://api.example.com/data",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: "Bearer {{inputs.token}}",
+          },
+        });
+
+        await step.execute({
+          inputData: { inputs: { token: "secret123" }, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(global.fetch).toHaveBeenCalledWith(
+          "https://api.example.com/data",
+          expect.objectContaining({
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: "Bearer secret123",
+            },
+          })
+        );
+      });
+
+      it("should send string body with interpolation", async () => {
+        const step = createHttpStep({
+          id: "http",
+          type: "http",
+          method: "POST",
+          url: "https://api.example.com/notify",
+          body: "Message: {{inputs.message}}",
+        });
+
+        await step.execute({
+          inputData: { inputs: { message: "Hello World" }, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(global.fetch).toHaveBeenCalledWith(
+          "https://api.example.com/notify",
+          expect.objectContaining({
+            body: "Message: Hello World",
+          })
+        );
+      });
+
+      it("should serialize object body as JSON", async () => {
+        const step = createHttpStep({
+          id: "http",
+          type: "http",
+          method: "POST",
+          url: "https://api.example.com/data",
+          body: { name: "test", count: 5 },
+        });
+
+        await step.execute({
+          inputData: { inputs: {}, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(global.fetch).toHaveBeenCalledWith(
+          "https://api.example.com/data",
+          expect.objectContaining({
+            body: '{"name":"test","count":5}',
+          })
+        );
+      });
+
+      it("should handle non-JSON response", async () => {
+        vi.mocked(global.fetch).mockResolvedValue({
+          ok: true,
+          status: 200,
+          text: () => Promise.resolve("plain text response"),
+          headers: new Headers([["content-type", "text/plain"]]),
+        } as Response);
+
+        const step = createHttpStep({
+          id: "http",
+          type: "http",
+          method: "GET",
+          url: "https://api.example.com/text",
+        });
+
+        const result = await step.execute({
+          inputData: { inputs: {}, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result.body).toBeNull();
+        expect(result.text).toBe("plain text response");
+      });
+    });
+
+    describe("error handling", () => {
+      it("should throw error on non-OK response with failOnError=true (default)", async () => {
+        vi.mocked(global.fetch).mockResolvedValue({
+          ok: false,
+          status: 500,
+          text: () => Promise.resolve("Internal Server Error"),
+          headers: new Headers(),
+        } as Response);
+
+        const step = createHttpStep({
+          id: "http",
+          type: "http",
+          method: "GET",
+          url: "https://api.example.com/error",
+        });
+
+        await expect(
+          step.execute({
+            inputData: { inputs: {}, steps: {} },
+          } as unknown as Parameters<typeof step.execute>[0])
+        ).rejects.toThrow("HTTP 500: Internal Server Error");
+      });
+
+      it("should return error response when failOnError=false", async () => {
+        vi.mocked(global.fetch).mockResolvedValue({
+          ok: false,
+          status: 404,
+          text: () => Promise.resolve("Not Found"),
+          headers: new Headers(),
+        } as Response);
+
+        const step = createHttpStep({
+          id: "http",
+          type: "http",
+          method: "GET",
+          url: "https://api.example.com/missing",
+          failOnError: false,
+        });
+
+        const result = await step.execute({
+          inputData: { inputs: {}, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result.status).toBe(404);
+        expect(result.text).toBe("Not Found");
+      });
+    });
+
+    describe("condition evaluation", () => {
+      it("should skip when condition is false", async () => {
+        const step = createHttpStep({
+          id: "http",
+          type: "http",
+          method: "POST",
+          url: "https://api.example.com/notify",
+          condition: "{{inputs.notify}}",
+        });
+
+        const result = await step.execute({
+          inputData: { inputs: { notify: "false" }, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result).toEqual({
+          status: 0,
+          body: null,
+          text: "",
+          headers: {},
+          skipped: true,
+        });
         expect(global.fetch).not.toHaveBeenCalled();
       });
     });
@@ -446,6 +1133,179 @@ describe("Step Adapters", () => {
         } as unknown as Parameters<typeof step.execute>[0]);
 
         expect(result).toEqual(previousResult);
+        expect(writeFile).not.toHaveBeenCalled();
+      });
+    });
+
+    describe("read action", () => {
+      it("should read file and return content", async () => {
+        vi.mocked(readFile).mockResolvedValue("file contents here");
+
+        const step = createFileStep({
+          id: "read",
+          type: "file",
+          action: "read",
+          path: "/tmp/input.txt",
+        });
+
+        const result = await step.execute({
+          inputData: { inputs: {}, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result).toEqual({ content: "file contents here" });
+        expect(readFile).toHaveBeenCalledWith("/tmp/input.txt", "utf-8");
+      });
+
+      it("should interpolate path", async () => {
+        vi.mocked(readFile).mockResolvedValue("data");
+
+        const step = createFileStep({
+          id: "read",
+          type: "file",
+          action: "read",
+          path: "{{inputs.dir}}/{{inputs.file}}",
+        });
+
+        await step.execute({
+          inputData: { inputs: { dir: "/home/user", file: "config.json" }, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(readFile).toHaveBeenCalledWith("/home/user/config.json", "utf-8");
+      });
+    });
+
+    describe("write action", () => {
+      it("should write string content to file", async () => {
+        vi.mocked(writeFile).mockResolvedValue(undefined);
+
+        const step = createFileStep({
+          id: "write",
+          type: "file",
+          action: "write",
+          path: "/tmp/output.txt",
+          content: "hello world",
+        });
+
+        const result = await step.execute({
+          inputData: { inputs: {}, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result).toEqual({ success: true });
+        expect(writeFile).toHaveBeenCalledWith("/tmp/output.txt", "hello world", "utf-8");
+      });
+
+      it("should interpolate content", async () => {
+        vi.mocked(writeFile).mockResolvedValue(undefined);
+
+        const step = createFileStep({
+          id: "write",
+          type: "file",
+          action: "write",
+          path: "/tmp/output.txt",
+          content: "Result: {{steps.compute.output}}",
+        });
+
+        await step.execute({
+          inputData: {
+            inputs: {},
+            steps: { compute: { output: "42" } },
+          },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(writeFile).toHaveBeenCalledWith("/tmp/output.txt", "Result: 42", "utf-8");
+      });
+
+      it("should auto-stringify object content", async () => {
+        vi.mocked(writeFile).mockResolvedValue(undefined);
+
+        const step = createFileStep({
+          id: "write",
+          type: "file",
+          action: "write",
+          path: "/tmp/config.json",
+          content: { name: "test", enabled: true },
+        });
+
+        await step.execute({
+          inputData: { inputs: {}, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(writeFile).toHaveBeenCalledWith(
+          "/tmp/config.json",
+          JSON.stringify({ name: "test", enabled: true }, null, 2),
+          "utf-8"
+        );
+      });
+
+      it("should throw error when content is missing", async () => {
+        const step = createFileStep({
+          id: "write",
+          type: "file",
+          action: "write",
+          path: "/tmp/output.txt",
+        } as Parameters<typeof createFileStep>[0]);
+
+        await expect(
+          step.execute({
+            inputData: { inputs: {}, steps: {} },
+          } as unknown as Parameters<typeof step.execute>[0])
+        ).rejects.toThrow("Content is required for write action");
+      });
+    });
+
+    describe("delete action", () => {
+      it("should delete file", async () => {
+        vi.mocked(unlink).mockResolvedValue(undefined);
+
+        const step = createFileStep({
+          id: "delete",
+          type: "file",
+          action: "delete",
+          path: "/tmp/temp.txt",
+        });
+
+        const result = await step.execute({
+          inputData: { inputs: {}, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result).toEqual({ success: true });
+        expect(unlink).toHaveBeenCalledWith("/tmp/temp.txt");
+      });
+
+      it("should interpolate path for delete", async () => {
+        vi.mocked(unlink).mockResolvedValue(undefined);
+
+        const step = createFileStep({
+          id: "delete",
+          type: "file",
+          action: "delete",
+          path: "{{inputs.tempDir}}/{{inputs.file}}",
+        });
+
+        await step.execute({
+          inputData: { inputs: { tempDir: "/tmp", file: "cache.dat" }, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(unlink).toHaveBeenCalledWith("/tmp/cache.dat");
+      });
+    });
+
+    describe("condition evaluation", () => {
+      it("should skip when condition is false", async () => {
+        const step = createFileStep({
+          id: "write",
+          type: "file",
+          action: "write",
+          path: "/tmp/output.txt",
+          content: "data",
+          condition: "{{inputs.write}}",
+        });
+
+        const result = await step.execute({
+          inputData: { inputs: { write: "false" }, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result).toEqual({ skipped: true });
         expect(writeFile).not.toHaveBeenCalled();
       });
     });

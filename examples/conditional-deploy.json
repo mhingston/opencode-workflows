@@ -1,0 +1,67 @@
+{
+  "id": "conditional-deploy",
+  "name": "Conditional Deployment",
+  "description": "Demonstrates conditional step execution based on environment and approval",
+  "version": "1.0.0",
+  "tags": ["conditional", "deploy"],
+  "inputs": {
+    "environment": "string",
+    "skipTests": "boolean"
+  },
+  "steps": [
+    {
+      "id": "run-tests",
+      "type": "shell",
+      "command": "npm test",
+      "description": "Run test suite (skipped if skipTests=true)",
+      "condition": "{{inputs.skipTests}}",
+      "failOnError": true
+    },
+    {
+      "id": "build",
+      "type": "shell",
+      "command": "npm run build",
+      "description": "Build the application",
+      "after": ["run-tests"]
+    },
+    {
+      "id": "deploy-staging",
+      "type": "shell",
+      "command": "deploy.sh --env staging",
+      "description": "Deploy to staging (always runs)",
+      "after": ["build"]
+    },
+    {
+      "id": "prod-approval",
+      "type": "suspend",
+      "message": "Staging deploy complete. Approve production deployment?",
+      "description": "Wait for production approval (only for prod environment)",
+      "condition": "{{inputs.environment}}",
+      "after": ["deploy-staging"]
+    },
+    {
+      "id": "deploy-prod",
+      "type": "shell",
+      "command": "deploy.sh --env production",
+      "description": "Deploy to production (only if environment=production)",
+      "condition": "{{inputs.environment}}",
+      "after": ["prod-approval"]
+    },
+    {
+      "id": "notify-team",
+      "type": "http",
+      "method": "POST",
+      "url": "{{env.SLACK_WEBHOOK_URL}}",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body": {
+        "text": "Deployed to {{inputs.environment}} successfully!"
+      },
+      "description": "Send notification (skipped if no webhook URL)",
+      "condition": "{{env.SLACK_WEBHOOK_URL}}",
+      "failOnError": false,
+      "after": ["deploy-staging", "deploy-prod"]
+    }
+  ]
+}

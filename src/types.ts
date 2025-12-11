@@ -35,7 +35,7 @@ export interface WorkflowPluginConfig {
 }
 
 export const DEFAULT_CONFIG: Required<WorkflowPluginConfig> = {
-  workflowDirs: [".opencode/workflows", "~/.config/opencode/workflows"],
+  workflowDirs: [".opencode/workflows", "~/.opencode/workflows"],
   dbPath: ".opencode/data/workflows.db",
   timeout: 300000, // 5 minutes
   verbose: false,

@@ -1,0 +1,54 @@
+{
+  "id": "file-operations",
+  "name": "File Operations Example",
+  "description": "Demonstrates file step for reading, writing, and processing files",
+  "version": "1.0.0",
+  "tags": ["file", "data-processing"],
+  "inputs": {
+    "inputFile": "string",
+    "outputDir": "string"
+  },
+  "steps": [
+    {
+      "id": "read-input",
+      "type": "file",
+      "action": "read",
+      "path": "{{inputs.inputFile}}",
+      "description": "Read the input file"
+    },
+    {
+      "id": "analyze-content",
+      "type": "agent",
+      "prompt": "Analyze this file content and provide a JSON summary with keys: lineCount, wordCount, mainTopics (array of strings). Content:\n\n{{steps.read-input.content}}",
+      "description": "Analyze file content with AI",
+      "after": ["read-input"]
+    },
+    {
+      "id": "write-analysis",
+      "type": "file",
+      "action": "write",
+      "path": "{{inputs.outputDir}}/analysis.json",
+      "content": {
+        "source": "{{inputs.inputFile}}",
+        "analysis": "{{steps.analyze-content.response}}",
+        "analyzedAt": "{{run.startedAt}}"
+      },
+      "description": "Write analysis to JSON file",
+      "after": ["analyze-content"]
+    },
+    {
+      "id": "create-backup",
+      "type": "shell",
+      "command": "cp {{inputs.inputFile}} {{inputs.outputDir}}/backup_$(date +%Y%m%d).txt",
+      "description": "Create dated backup of input file",
+      "after": ["read-input"]
+    },
+    {
+      "id": "summarize",
+      "type": "agent",
+      "prompt": "The file {{inputs.inputFile}} was analyzed and results written to {{inputs.outputDir}}/analysis.json. A backup was also created. Provide a brief confirmation message.",
+      "description": "Summarize operations",
+      "after": ["write-analysis", "create-backup"]
+    }
+  ]
+}

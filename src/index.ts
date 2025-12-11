@@ -225,27 +225,9 @@ export const WorkflowPlugin: Plugin = async ({ project, directory, worktree, cli
       }
     },
 
-    /**
-     * Slash command handler for /workflow
-     */
-    command: {
-      workflow: async (args: string) => {
-        // Ensure initialized
-        if (!state.initialized) {
-          await initialize();
-        }
-
-        const result = await handleWorkflowCommand(args, {
-          factory: state.factory,
-          runner: state.runner,
-          definitions: state.definitions,
-          log: state.log,
-        });
-
-        // Return the formatted message to the TUI
-        return result.message;
-      },
-    },
+    // NOTE: OpenCode does not support plugin-defined slash commands.
+    // Slash commands must be defined in config or .opencode/command/ markdown files.
+    // The workflow tool below provides the same functionality for agent use.
 
     /**
      * Tool definitions for agent use
@@ -301,8 +283,8 @@ Modes:
   };
 };
 
-// Also export as default for backwards compatibility
-export default WorkflowPlugin;
+// NOTE: Do NOT export as default - OpenCode's plugin loader calls ALL exports
+// as functions, which would cause double initialization.
 
 // IMPORTANT: Only export the plugin function from the main entry point.
 // OpenCode's plugin loader iterates over ALL exports and tries to call each

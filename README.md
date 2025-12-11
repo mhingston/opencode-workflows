@@ -26,14 +26,29 @@ Add to your `opencode.json`:
 }
 ```
 
-### Defaults
+### Configuration Options
 
-The plugin uses the following defaults:
+You can customize the plugin behavior:
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| Workflow directory | `.opencode/workflows` | Directory scanned for workflow JSON files |
-| Database path | `.opencode/data/workflows.db` | SQLite database for persisting workflow runs |
+```json
+{
+  "plugin": [
+    ["opencode-workflows", {
+      "workflowDirs": [".opencode/workflows", "~/.opencode/workflows"],
+      "dbPath": ".opencode/data/workflows.db",
+      "timeout": 300000,
+      "verbose": false
+    }]
+  ]
+}
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `workflowDirs` | `string[]` | `[".opencode/workflows", "~/.opencode/workflows"]` | Directories to scan for workflow JSON files. Supports `~` for home directory. |
+| `dbPath` | `string` | `".opencode/data/workflows.db"` | SQLite database path for persisting workflow runs |
+| `timeout` | `number` | `300000` (5 min) | Global timeout for workflow execution in milliseconds |
+| `verbose` | `boolean` | `false` | Enable verbose debug logging |
 
 ### Persistence
 
@@ -47,10 +62,11 @@ The database is created automatically at the configured `dbPath`.
 
 ## Workflow Definitions
 
-Create workflow definitions in `.opencode/workflows/` as JSON files:
+Create workflow definitions in `.opencode/workflows/` as JSON or JSONC files. JSONC files support comments for better documentation:
 
-```json
+```jsonc
 {
+  // Unique workflow identifier
   "id": "deploy-prod",
   "description": "Deploys the application to production",
   "inputs": {
@@ -96,9 +112,20 @@ Execute shell commands:
   "command": "npm run build",
   "cwd": "./packages/app",
   "env": { "NODE_ENV": "production" },
-  "failOnError": true
+  "failOnError": true,
+  "timeout": 60000,
+  "retry": { "attempts": 3, "delay": 1000 }
 }
 ```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `command` | `string` | required | Shell command to execute |
+| `cwd` | `string` | - | Working directory (supports interpolation) |
+| `env` | `object` | - | Environment variables (supports interpolation) |
+| `failOnError` | `boolean` | `true` | Fail workflow if command exits non-zero |
+| `timeout` | `number` | - | Step-specific timeout in milliseconds |
+| `retry` | `object` | - | Retry configuration: `{ attempts: number, delay?: number }` |
 
 ### Tool Step
 Invoke OpenCode tools:
@@ -250,6 +277,22 @@ Use `{{expression}}` syntax to reference:
 - `{{run.workflowId}}` - Workflow definition ID
 - `{{run.startedAt}}` - ISO timestamp when run started
 
+### Nested Property Access
+
+You can access deeply nested properties using dot notation:
+```json
+{
+  "id": "use-api-data",
+  "type": "shell",
+  "command": "echo 'User ID: {{steps.api-call.body.data.user.id}}'"
+}
+```
+
+This works for:
+- JSON responses from HTTP steps: `{{steps.http.body.users[0].name}}`
+- Complex tool results: `{{steps.tool.result.metadata.version}}`
+- Nested input objects (when passed as JSON): `{{inputs.config.database.host}}`
+
 ### Type Preservation
 
 When a template contains only a single variable reference (e.g., `"{{inputs.count}}"`), the original type is preserved. This means:
@@ -283,6 +326,49 @@ Steps can declare dependencies using `after`:
 ```
 
 Steps at the same dependency level run in parallel.
+
+## Crash Recovery
+
+Workflow state is persisted to SQLite after each step completes. This provides automatic crash recovery:
+
+1. **Automatic Restoration**: When the plugin starts, any "running" or "suspended" workflows are automatically restored
+2. **Idempotent Execution**: Completed steps are skipped on resume, preventing duplicate side effects
+3. **Suspend Preservation**: Suspended workflows waiting for human input survive restarts
+
+### How It Works
+
+After each step completes, the workflow state (including all step results) is saved to the database. On restart:
+- Steps with existing results are skipped (idempotency)
+- The workflow resumes from the first incomplete step
+- For suspended workflows, the resume data is preserved
+
+This means you can safely restart OpenCode without losing workflow progress.
+
+## Triggers (Experimental)
+
+Workflows can optionally define trigger configurations for future automation:
+
+```json
+{
+  "id": "nightly-backup",
+  "trigger": {
+    "schedule": "0 2 * * *"
+  },
+  "steps": [...]
+}
+```
+
+```json
+{
+  "id": "on-push-deploy",
+  "trigger": {
+    "event": "git.push"
+  },
+  "steps": [...]
+}
+```
+
+> **Note**: Trigger execution is not yet implemented. These fields are reserved for future functionality.
 
 ## Agent Orchestration
 
