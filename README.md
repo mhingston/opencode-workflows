@@ -16,39 +16,33 @@ Workflow automation plugin for OpenCode using the Mastra workflow engine. Define
 npm install opencode-workflows
 ```
 
-## Configuration
+## Installation
 
-Add to your `opencode.json`:
+Install the plugin in your project's `.opencode/plugin` directory:
 
-```json
-{
-  "plugin": ["opencode-workflows"]
-}
+```bash
+# From your project root
+npm install opencode-workflows --prefix .opencode/plugin
 ```
 
-### Configuration Options
+Or install globally:
 
-You can customize the plugin behavior:
-
-```json
-{
-  "plugin": [
-    ["opencode-workflows", {
-      "workflowDirs": [".opencode/workflows", "~/.opencode/workflows"],
-      "dbPath": ".opencode/data/workflows.db",
-      "timeout": 300000,
-      "verbose": false
-    }]
-  ]
-}
+```bash
+npm install opencode-workflows --prefix ~/.config/opencode/plugin
 ```
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `workflowDirs` | `string[]` | `[".opencode/workflows", "~/.opencode/workflows"]` | Directories to scan for workflow JSON files. Supports `~` for home directory. |
-| `dbPath` | `string` | `".opencode/data/workflows.db"` | SQLite database path for persisting workflow runs |
-| `timeout` | `number` | `300000` (5 min) | Global timeout for workflow execution in milliseconds |
-| `verbose` | `boolean` | `false` | Enable verbose debug logging |
+The plugin will be automatically loaded when OpenCode starts.
+
+### Configuration
+
+The plugin uses sensible defaults but can be configured via environment variables:
+
+| Environment Variable | Default | Description |
+|---------------------|---------|-------------|
+| `WORKFLOW_DIRS` | `.opencode/workflows,~/.opencode/workflows` | Comma-separated directories to scan for workflow JSON files |
+| `WORKFLOW_DB_PATH` | `.opencode/data/workflows.db` | SQLite database path for persisting workflow runs |
+| `WORKFLOW_TIMEOUT` | `300000` (5 min) | Global timeout for workflow execution in milliseconds |
+| `WORKFLOW_VERBOSE` | `false` | Enable verbose debug logging |
 
 ### Persistence
 
