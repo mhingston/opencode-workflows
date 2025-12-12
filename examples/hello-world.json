@@ -1,4 +1,5 @@
 {
+  "$schema": "https://raw.githubusercontent.com/mark-hingston/opencode-workflows/main/schemas/workflow.schema.json",
   "id": "hello-world",
   "name": "Hello World Workflow",
   "description": "A simple test workflow that echoes a greeting",

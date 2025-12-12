@@ -1,4 +1,5 @@
 {
+  "$schema": "https://raw.githubusercontent.com/mark-hingston/opencode-workflows/main/schemas/workflow.schema.json",
   "id": "webhook-notify",
   "name": "Webhook Notification",
   "description": "Demonstrates HTTP step for sending notifications to external services",

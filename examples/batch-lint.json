@@ -1,4 +1,5 @@
 {
+  "$schema": "https://raw.githubusercontent.com/mark-hingston/opencode-workflows/main/schemas/workflow.schema.json",
   "id": "batch-lint",
   "name": "Batch Lint Files",
   "description": "Demonstrates the iterator step by linting multiple files found by a pattern",

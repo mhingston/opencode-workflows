@@ -1,4 +1,5 @@
 {
+  "$schema": "https://raw.githubusercontent.com/mark-hingston/opencode-workflows/main/schemas/workflow.schema.json",
   "id": "run-ci",
   "name": "Run CI Pipeline",
   "description": "Runs lint, tests, and type checks in parallel",

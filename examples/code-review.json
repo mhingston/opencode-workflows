@@ -1,4 +1,5 @@
 {
+  "$schema": "https://raw.githubusercontent.com/mark-hingston/opencode-workflows/main/schemas/workflow.schema.json",
   "id": "code-review",
   "name": "Multi-Agent Code Review",
   "description": "Parallel expert code review with synthesis and optional auto-fix",

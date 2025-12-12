@@ -1,4 +1,5 @@
 {
+  "$schema": "https://raw.githubusercontent.com/mark-hingston/opencode-workflows/main/schemas/workflow.schema.json",
   "id": "deploy-prod",
   "name": "Deploy to Production",
   "description": "Deploys the application to production with tests and approval",
