@@ -438,7 +438,7 @@ Output:
 graph TD
   check-git["check-git (shell)"]
   run-tests["run-tests (shell)"]
-  ask-approval([ask-approval (suspend)])
+  ask-approval(["ask-approval (suspend)"])
   deploy-script["deploy-script (shell)"]
   check-git --> run-tests
   run-tests --> ask-approval
