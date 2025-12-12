@@ -10,19 +10,17 @@
   "steps": [
     {
       "id": "read_file",
-      "type": "tool",
+      "type": "file",
       "description": "Read the source file",
-      "tool": "read",
-      "args": {
-        "filePath": "{{inputs.file}}"
-      }
+      "action": "read",
+      "path": "{{inputs.file}}"
     },
     {
       "id": "security_review",
       "type": "agent",
       "description": "Security vulnerability analysis",
       "agent": "security-reviewer",
-      "prompt": "Review this code for security issues:\n\n{{steps.read_file.result}}",
+      "prompt": "Review this code for security issues:\n\n{{steps.read_file.content}}",
       "after": ["read_file"]
     },
     {
@@ -30,7 +28,7 @@
       "type": "agent",
       "description": "Performance analysis",
       "agent": "performance-reviewer",
-      "prompt": "Review this code for performance issues:\n\n{{steps.read_file.result}}",
+      "prompt": "Review this code for performance issues:\n\n{{steps.read_file.content}}",
       "after": ["read_file"]
     },
     {
@@ -38,7 +36,7 @@
       "type": "agent",
       "description": "Code quality analysis",
       "agent": "quality-reviewer",
-      "prompt": "Review this code for quality issues:\n\n{{steps.read_file.result}}",
+      "prompt": "Review this code for quality issues:\n\n{{steps.read_file.content}}",
       "after": ["read_file"]
     },
     {
@@ -61,7 +59,7 @@
       "type": "agent",
       "description": "Generate fixed code",
       "agent": "code-fixer",
-      "prompt": "Fix the critical and high severity issues in this code:\n\nOriginal code:\n{{steps.read_file.result}}\n\nIssues to fix:\n{{steps.synthesize.response}}",
+      "prompt": "Fix the critical and high severity issues in this code:\n\nOriginal code:\n{{steps.read_file.content}}\n\nIssues to fix:\n{{steps.synthesize.response}}",
       "after": ["approve_fixes"]
     }
   ]
