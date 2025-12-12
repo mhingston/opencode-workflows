@@ -221,6 +221,7 @@ export interface WorkflowTrigger {
 
 /** Complete workflow definition */
 export interface WorkflowDefinition {
+  $schema?: string;
   id: string;
   name?: string;
   description?: string;
@@ -539,6 +540,7 @@ export const WorkflowTriggerSchema = z.object({
 });
 
 export const WorkflowDefinitionSchema = z.object({
+  $schema: z.string().optional(),
   id: z.string().min(1),
   name: z.string().optional(),
   description: z.string().optional(),
