@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { WorkflowRunner } from "./runner.js";
 import type { WorkflowFactory, WorkflowFactoryResult } from "../factory/index.js";
 import type { WorkflowStorage } from "../storage/index.js";
+import { MissingInputsError } from "../types.js";
 import type { WorkflowRun, Logger } from "../types.js";
 
 // Mock UUID generation for deterministic tests
@@ -197,6 +198,97 @@ describe("WorkflowRunner", () => {
 
       expect(mockLogger.error).toHaveBeenCalledWith(
         expect.stringContaining("failed")
+      );
+    });
+
+    it("should throw MissingInputsError when required inputs are missing", async () => {
+      const workflowWithInputs: WorkflowFactoryResult = {
+        workflow: mockWorkflow,
+        id: "workflow-with-inputs",
+        description: "Test workflow",
+        inputSchema: {
+          version: "string",
+          count: "number",
+        },
+      };
+      (mockFactory.get as ReturnType<typeof vi.fn>).mockReturnValue(workflowWithInputs);
+
+      await expect(runner.run("workflow-with-inputs", {})).rejects.toThrow(
+        MissingInputsError
+      );
+    });
+
+    it("should include all missing inputs in MissingInputsError", async () => {
+      const workflowWithInputs: WorkflowFactoryResult = {
+        workflow: mockWorkflow,
+        id: "workflow-with-inputs",
+        description: "Test workflow",
+        inputSchema: {
+          version: "string",
+          count: "number",
+          enabled: "boolean",
+        },
+      };
+      (mockFactory.get as ReturnType<typeof vi.fn>).mockReturnValue(workflowWithInputs);
+
+      try {
+        await runner.run("workflow-with-inputs", { count: 5 });
+        expect.fail("Should have thrown MissingInputsError");
+      } catch (error) {
+        expect(error).toBeInstanceOf(MissingInputsError);
+        const missingError = error as MissingInputsError;
+        expect(missingError.workflowId).toBe("workflow-with-inputs");
+        expect(missingError.missingInputs).toEqual(["version", "enabled"]);
+        expect(missingError.inputSchema).toEqual({
+          version: "string",
+          count: "number",
+          enabled: "boolean",
+        });
+      }
+    });
+
+    it("should not throw when all required inputs are provided", async () => {
+      const workflowWithInputs: WorkflowFactoryResult = {
+        workflow: mockWorkflow,
+        id: "workflow-with-inputs",
+        description: "Test workflow",
+        inputSchema: {
+          version: "string",
+          count: "number",
+        },
+      };
+      (mockFactory.get as ReturnType<typeof vi.fn>).mockReturnValue(workflowWithInputs);
+
+      const runId = await runner.run("workflow-with-inputs", { version: "1.0.0", count: 5 });
+      expect(runId).toBe("test-uuid-1234");
+    });
+
+    it("should not validate inputs if workflow has no input schema", async () => {
+      const workflowNoInputs: WorkflowFactoryResult = {
+        workflow: mockWorkflow,
+        id: "workflow-no-inputs",
+        description: "Test workflow",
+        inputSchema: undefined,
+      };
+      (mockFactory.get as ReturnType<typeof vi.fn>).mockReturnValue(workflowNoInputs);
+
+      const runId = await runner.run("workflow-no-inputs", {});
+      expect(runId).toBe("test-uuid-1234");
+    });
+
+    it("should treat empty string as missing input", async () => {
+      const workflowWithInputs: WorkflowFactoryResult = {
+        workflow: mockWorkflow,
+        id: "workflow-with-inputs",
+        description: "Test workflow",
+        inputSchema: {
+          version: "string",
+        },
+      };
+      (mockFactory.get as ReturnType<typeof vi.fn>).mockReturnValue(workflowWithInputs);
+
+      await expect(runner.run("workflow-with-inputs", { version: "" })).rejects.toThrow(
+        MissingInputsError
       );
     });
   });
@@ -587,6 +679,7 @@ describe("WorkflowRunner hydration after restart", () => {
     expect(mockMastraRun.start).toHaveBeenCalledWith({
       inputData: {
         inputs: { version: "1.0.0" },
+        secretInputs: [],
         steps: {
           "step-1": { stdout: "build output", stderr: "", exitCode: 0 },
           "step-2": { response: "LLM analysis result" },

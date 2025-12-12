@@ -1,0 +1,17 @@
+{
+  "id": "test-on-save",
+  "name": "Run Tests on File Change",
+  "description": "Automatically run tests when TypeScript files are modified",
+  "trigger": {
+    "event": "file.change",
+    "pattern": "src/**/*.{ts,tsx}"
+  },
+  "steps": [
+    {
+      "id": "run-tests",
+      "type": "shell",
+      "description": "Run the test suite",
+      "command": "npm test"
+    }
+  ]
+}

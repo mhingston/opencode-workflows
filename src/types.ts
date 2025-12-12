@@ -1,6 +1,36 @@
 import { z } from "zod";
 
 // =============================================================================
+// Error Classes
+// =============================================================================
+
+/**
+ * Error thrown when required workflow inputs are missing.
+ * The Agent can interpret this error to prompt the user for the missing inputs.
+ */
+export class MissingInputsError extends Error {
+  /** The workflow ID that requires the inputs */
+  readonly workflowId: string;
+  /** Array of missing input names */
+  readonly missingInputs: string[];
+  /** The workflow's full input schema */
+  readonly inputSchema: Record<string, "string" | "number" | "boolean">;
+
+  constructor(
+    workflowId: string,
+    missingInputs: string[],
+    inputSchema: Record<string, "string" | "number" | "boolean">
+  ) {
+    const inputList = missingInputs.map(name => `${name} (${inputSchema[name]})`).join(", ");
+    super(`Missing required input(s) for workflow '${workflowId}': ${inputList}`);
+    this.name = "MissingInputsError";
+    this.workflowId = workflowId;
+    this.missingInputs = missingInputs;
+    this.inputSchema = inputSchema;
+  }
+}
+
+// =============================================================================
 // Primitive Types
 // =============================================================================
 
@@ -46,7 +76,7 @@ export const DEFAULT_CONFIG: Required<WorkflowPluginConfig> = {
 // =============================================================================
 
 /** Step types supported by the workflow engine */
-export type StepType = "shell" | "tool" | "agent" | "suspend" | "http" | "file";
+export type StepType = "shell" | "tool" | "agent" | "suspend" | "wait" | "http" | "file" | "iterator";
 
 /** HTTP methods supported by the HTTP step */
 export type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS";
@@ -113,6 +143,13 @@ export interface SuspendStepDefinition extends BaseStepDefinition {
   resumeSchema?: JsonObject;
 }
 
+/** Wait/delay step for pausing workflow execution */
+export interface WaitStepDefinition extends BaseStepDefinition {
+  type: "wait";
+  /** Duration to wait in milliseconds */
+  durationMs: number;
+}
+
 /** HTTP request step for API calls */
 export interface HttpStepDefinition extends BaseStepDefinition {
   type: "http";
@@ -139,14 +176,48 @@ export interface FileStepDefinition extends BaseStepDefinition {
   content?: string | JsonValue;
 }
 
+/** Inner step types - all step types except iterator (no nesting) */
+export type InnerStepDefinition =
+  | ShellStepDefinition
+  | ToolStepDefinition
+  | AgentStepDefinition
+  | SuspendStepDefinition
+  | WaitStepDefinition
+  | HttpStepDefinition
+  | FileStepDefinition;
+
+/**
+ * Iterator step for batch processing.
+ * Loops over an array and executes a sub-step for each item.
+ */
+export interface IteratorStepDefinition extends BaseStepDefinition {
+  type: "iterator";
+  /** Interpolation string resolving to an array (e.g., "{{steps.find-files.result}}") */
+  items: string;
+  /** The step definition to run for each item. The current item is available as {{inputs.item}} and index as {{inputs.index}}. The id is optional and will be auto-generated if not provided. */
+  runStep: InnerStepDefinition | (Omit<InnerStepDefinition, "id"> & { id?: string });
+}
+
 /** Union of all step definition types */
 export type StepDefinition =
   | ShellStepDefinition
   | ToolStepDefinition
   | AgentStepDefinition
   | SuspendStepDefinition
+  | WaitStepDefinition
   | HttpStepDefinition
-  | FileStepDefinition;
+  | FileStepDefinition
+  | IteratorStepDefinition;
+
+/** Trigger configuration for automatic workflow execution */
+export interface WorkflowTrigger {
+  /** Auto-run on specific events (e.g., "file.change") */
+  event?: string;
+  /** Cron schedule expression (e.g., "0 2 * * *" for 2am daily) */
+  schedule?: string;
+  /** Glob pattern for file change triggers (used when event is "file.change") */
+  pattern?: string;
+}
 
 /** Complete workflow definition */
 export interface WorkflowDefinition {
@@ -157,17 +228,18 @@ export interface WorkflowDefinition {
   version?: string;
   /** Input parameters schema - maps param name to type name */
   inputs?: Record<string, "string" | "number" | "boolean">;
+  /** 
+   * List of input names that contain sensitive data (e.g., passwords, API keys).
+   * These values will be masked in logs (shown as ***) and encrypted in storage.
+   * Environment variables accessed via {{env.VAR_NAME}} are always treated as secrets.
+   */
+  secrets?: string[];
   /** Ordered list of steps */
   steps: StepDefinition[];
   /** Tags for categorization */
   tags?: string[];
-  /** Trigger configuration */
-  trigger?: {
-    /** Auto-run on specific events */
-    event?: string;
-    /** Cron schedule */
-    schedule?: string;
-  };
+  /** Trigger configuration for automatic workflow execution */
+  trigger?: WorkflowTrigger;
 }
 
 // =============================================================================
@@ -210,6 +282,15 @@ export interface SuspendStepOutput {
   skipped?: boolean;
 }
 
+/** Wait step output */
+export interface WaitStepOutput {
+  /** Whether the wait completed successfully */
+  completed: boolean;
+  /** Duration waited in milliseconds */
+  durationMs: number;
+  skipped?: boolean;
+}
+
 /** HTTP step output */
 export interface HttpStepOutput {
   status: number;
@@ -230,14 +311,25 @@ export interface FileStepOutput {
   skipped?: boolean;
 }
 
+/** Iterator step output */
+export interface IteratorStepOutput {
+  /** Array of results from each iteration */
+  results: StepOutput[];
+  /** Number of items processed */
+  count: number;
+  skipped?: boolean;
+}
+
 /** Union of all step output types */
 export type StepOutput = 
   | ShellStepOutput 
   | ToolStepOutput 
   | AgentStepOutput 
   | SuspendStepOutput
+  | WaitStepOutput
   | HttpStepOutput
-  | FileStepOutput;
+  | FileStepOutput
+  | IteratorStepOutput;
 
 /** Step execution result */
 export interface StepResult {
@@ -276,6 +368,8 @@ export interface StepExecutionContext {
   shell: ShellExecutor;
   /** Logging utilities */
   log: Logger;
+  /** List of input names that are secrets (for masking in logs) */
+  secretInputs?: string[];
 }
 
 // =============================================================================
@@ -331,7 +425,7 @@ export interface Logger {
 // =============================================================================
 
 /** Zod schema for JSON values (recursive) */
-const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
+export const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
   z.union([
     z.string(),
     z.number(),
@@ -344,7 +438,7 @@ const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
 
 export const BaseStepSchema = z.object({
   id: z.string().min(1),
-  type: z.enum(["shell", "tool", "agent", "suspend", "http", "file"]),
+  type: z.enum(["shell", "tool", "agent", "suspend", "wait", "http", "file", "iterator"]),
   description: z.string().optional(),
   after: z.array(z.string()).optional(),
   condition: z.string().optional(),
@@ -386,6 +480,11 @@ export const SuspendStepSchema = BaseStepSchema.extend({
   resumeSchema: z.record(JsonValueSchema).optional(),
 });
 
+export const WaitStepSchema = BaseStepSchema.extend({
+  type: z.literal("wait"),
+  durationMs: z.number().int().positive(),
+});
+
 export const HttpStepSchema = BaseStepSchema.extend({
   type: z.literal("http"),
   method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]),
@@ -402,14 +501,42 @@ export const FileStepSchema = BaseStepSchema.extend({
   content: z.union([z.string(), JsonValueSchema]).optional(),
 });
 
+/** Schema for inner step within iterator (id is optional, will be auto-generated) */
+const InnerStepSchema = z.object({
+  id: z.string().optional(),
+  type: z.enum(["shell", "tool", "agent", "suspend", "wait", "http", "file"]),
+  description: z.string().optional(),
+  after: z.array(z.string()).optional(),
+  condition: z.string().optional(),
+  timeout: z.number().positive().optional(),
+  retry: z.object({
+    attempts: z.number().int().positive(),
+    delay: z.number().positive().optional(),
+  }).optional(),
+}).passthrough(); // Allow additional properties based on step type
+
+export const IteratorStepSchema = BaseStepSchema.extend({
+  type: z.literal("iterator"),
+  items: z.string().min(1),
+  runStep: InnerStepSchema,
+});
+
 export const StepSchema = z.discriminatedUnion("type", [
   ShellStepSchema,
   ToolStepSchema,
   AgentStepSchema,
   SuspendStepSchema,
+  WaitStepSchema,
   HttpStepSchema,
   FileStepSchema,
+  IteratorStepSchema,
 ]);
+
+export const WorkflowTriggerSchema = z.object({
+  event: z.string().optional(),
+  schedule: z.string().optional(),
+  pattern: z.string().optional(),
+});
 
 export const WorkflowDefinitionSchema = z.object({
   id: z.string().min(1),
@@ -417,12 +544,10 @@ export const WorkflowDefinitionSchema = z.object({
   description: z.string().optional(),
   version: z.string().optional(),
   inputs: z.record(z.enum(["string", "number", "boolean"])).optional(),
+  secrets: z.array(z.string()).optional(),
   steps: z.array(StepSchema).min(1),
   tags: z.array(z.string()).optional(),
-  trigger: z.object({
-    event: z.string().optional(),
-    schedule: z.string().optional(),
-  }).optional(),
+  trigger: WorkflowTriggerSchema.optional(),
 });
 
 // =============================================================================

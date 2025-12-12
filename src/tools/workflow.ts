@@ -1,20 +1,7 @@
 import { z } from "zod";
 import type { WorkflowDefinition, WorkflowRun, InputValue, JsonValue } from "../types.js";
+import { JsonValueSchema } from "../types.js";
 import type { WorkflowRunner } from "../commands/runner.js";
-
-/**
- * Zod schema for JSON values (recursive)
- */
-const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
-  z.union([
-    z.string(),
-    z.number(),
-    z.boolean(),
-    z.null(),
-    z.array(JsonValueSchema),
-    z.record(JsonValueSchema),
-  ])
-);
 
 /**
  * Schema for workflow input parameters

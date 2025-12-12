@@ -14,15 +14,20 @@ import type {
   WorkflowDefinition,
   OpencodeClient,
   Logger,
-  JsonObject,
   JsonValue,
 } from "./types.js";
 import { DEFAULT_CONFIG } from "./types.js";
 import { loadWorkflows, createLogger } from "./loader/index.js";
 import { WorkflowFactory } from "./factory/index.js";
-import { WorkflowRunner, handleWorkflowCommand, WorkflowStorage } from "./commands/index.js";
+import { WorkflowRunner, WorkflowStorage } from "./commands/index.js";
 import { executeWorkflowTool } from "./tools/index.js";
 import { resolve } from "node:path";
+import {
+  createTriggerState,
+  setupTriggers as setupTriggersFromModule,
+  handleFileChange,
+  type TriggerState,
+} from "./triggers/index.js";
 
 /**
  * Plugin state maintained across the session
@@ -34,6 +39,8 @@ interface PluginState {
   storage: WorkflowStorage | null;
   log: Logger;
   initialized: boolean;
+  /** Trigger state for cron and file change triggers */
+  triggers: TriggerState;
 }
 
 /**
@@ -116,6 +123,7 @@ export const WorkflowPlugin: Plugin = async ({ project, directory, worktree, cli
     storage: null,
     log,
     initialized: false,
+    triggers: createTriggerState(),
   };
 
   /**
@@ -181,8 +189,22 @@ export const WorkflowPlugin: Plugin = async ({ project, directory, worktree, cli
 
     // Create storage for persistence
     const dbPath = config.dbPath ?? resolve(projectDir, ".opencode/data/workflows.db");
-    state.storage = new WorkflowStorage({ dbPath, verbose: config.verbose }, log);
+    // Pass encryption key from config/env if available
+    const encryptionKey = process.env.WORKFLOW_ENCRYPTION_KEY;
+    state.storage = new WorkflowStorage({ 
+      dbPath, 
+      verbose: config.verbose,
+      encryptionKey 
+    }, log);
     await state.storage.init();
+
+    // Register workflow secrets with storage so they can be encrypted
+    for (const [id, def] of workflows) {
+      if (def.secrets && def.secrets.length > 0) {
+        state.storage.setWorkflowSecrets(id, def.secrets);
+      }
+    }
+
     log.debug("Workflow storage initialized");
 
     // Create runner with storage and timeout config
@@ -195,6 +217,11 @@ export const WorkflowPlugin: Plugin = async ({ project, directory, worktree, cli
 
     state.initialized = true;
     log.info(`Loaded ${workflows.size} workflow(s)`);
+
+    // Setup triggers after initialization
+    if (state.runner) {
+      setupTriggersFromModule(state.triggers, state.definitions, state.runner, log);
+    }
   }
 
   // Initialize immediately
@@ -216,8 +243,9 @@ export const WorkflowPlugin: Plugin = async ({ project, directory, worktree, cli
 
         case "file.edited":
         case "file.watcher.updated": {
-          // Reload workflows when workflow files change
           const path = (event as { path?: string }).path;
+          
+          // Reload workflows when workflow files change
           if (
             path?.includes(".opencode/workflows/") &&
             (path.endsWith(".json") || path.endsWith(".ts"))
@@ -232,6 +260,11 @@ export const WorkflowPlugin: Plugin = async ({ project, directory, worktree, cli
             
             state.initialized = false;
             await initialize();
+          }
+          
+          // Trigger file change workflows
+          if (path && state.initialized && state.runner) {
+            handleFileChange(state.triggers, state.definitions, state.runner, log, path);
           }
           break;
         }
@@ -331,8 +364,10 @@ export type {
   SuspendStepDefinition,
   HttpStepDefinition,
   FileStepDefinition,
+  WaitStepDefinition,
   StepDefinition,
   WorkflowDefinition,
+  WorkflowTrigger,
   WorkflowRunStatus,
   ShellStepOutput,
   ToolStepOutput,
@@ -340,6 +375,8 @@ export type {
   SuspendStepOutput,
   HttpStepOutput,
   FileStepOutput,
+  WaitStepOutput,
+  IteratorStepOutput,
   StepOutput,
   StepResult,
   WorkflowRun,

@@ -41,6 +41,112 @@ Workflow runs are automatically persisted to a LibSQL (SQLite) database. This en
 
 The database is created automatically at the configured `dbPath`.
 
+### Secrets and Sensitive Input Handling
+
+Workflows often need to handle sensitive data like API keys, passwords, and tokens. The plugin provides built-in security features to protect these values:
+
+#### Marking Inputs as Secrets
+
+Add a `secrets` array to your workflow definition listing which input names contain sensitive data:
+
+```json
+{
+  "id": "deploy-with-credentials",
+  "description": "Deploy using API credentials",
+  "inputs": {
+    "environment": "string",
+    "apiKey": "string",
+    "dbPassword": "string"
+  },
+  "secrets": ["apiKey", "dbPassword"],
+  "steps": [
+    {
+      "id": "deploy",
+      "type": "shell",
+      "command": "deploy.sh --env={{inputs.environment}} --key={{inputs.apiKey}}"
+    }
+  ]
+}
+```
+
+#### What Gets Protected
+
+1. **Log Masking**: Any input listed in `secrets` is replaced with `***` in console output
+   - The command `deploy.sh --env=prod --key=sk-12345` appears as `deploy.sh --env=prod --key=***`
+
+2. **Environment Variables**: All `{{env.*}}` interpolations are automatically treated as secrets
+   - No need to add them to the `secrets` array
+   - `{{env.API_KEY}}` is always masked in logs
+
+3. **Storage Encryption**: When an encryption key is configured, secret inputs are encrypted at rest in the SQLite database using AES-256-GCM
+
+#### Configuring Storage Encryption
+
+To enable encryption for secrets stored in the database, configure an encryption key:
+
+```typescript
+import { createWorkflowPlugin } from "opencode-workflows";
+
+const plugin = createWorkflowPlugin({
+  storage: {
+    encryptionKey: process.env.WORKFLOW_ENCRYPTION_KEY
+  }
+});
+```
+
+The encryption key should be:
+- Exactly 32 characters for AES-256
+- Stored securely (environment variable, secrets manager)
+- Never committed to version control
+
+When encryption is enabled:
+- Secret inputs are encrypted before being saved to the database
+- Secrets are automatically decrypted when loading workflow runs
+- Non-secret inputs remain unencrypted for easier debugging
+
+#### Example: Secure API Deployment
+
+```json
+{
+  "id": "secure-deploy",
+  "description": "Deploy with encrypted credentials",
+  "inputs": {
+    "version": "string",
+    "apiToken": "string",
+    "webhookSecret": "string"
+  },
+  "secrets": ["apiToken", "webhookSecret"],
+  "steps": [
+    {
+      "id": "deploy",
+      "type": "shell",
+      "command": "deploy --version={{inputs.version}} --token={{inputs.apiToken}}"
+    },
+    {
+      "id": "notify",
+      "type": "http",
+      "method": "POST",
+      "url": "https://api.example.com/webhooks",
+      "headers": {
+        "Authorization": "Bearer {{inputs.webhookSecret}}"
+      },
+      "body": {
+        "version": "{{inputs.version}}",
+        "status": "deployed"
+      },
+      "after": ["deploy"]
+    }
+  ]
+}
+```
+
+In the logs, you'll see:
+```
+> deploy --version=1.0.0 --token=***
+```
+
+And in the database, the `apiToken` and `webhookSecret` values are stored encrypted.
+
 ## Workflow Definitions
 
 Create workflow definitions in `.opencode/workflows/` as JSON or JSONC files. JSONC files support comments for better documentation:
@@ -81,6 +187,22 @@ Create workflow definitions in `.opencode/workflows/` as JSON or JSONC files. JS
   ]
 }
 ```
+
+### Input Validation
+
+When a workflow defines inputs, all inputs are **required by default**. If you try to run a workflow without providing all required inputs, the plugin will return a helpful error message listing the missing inputs:
+
+```
+$ /workflow run deploy-prod
+
+Missing required input(s) for workflow **deploy-prod**:
+
+- **version** (string)
+
+Usage: `/workflow run deploy-prod version=<value>`
+```
+
+This validation happens before the workflow starts, ensuring you don't waste time on a run that would fail due to missing inputs.
 
 ## Step Types
 
@@ -169,6 +291,27 @@ Pause for human input:
 }
 ```
 
+### Wait Step
+Pause workflow execution for a specified duration (platform-independent alternative to `shell: sleep`):
+```json
+{
+  "id": "wait-for-deploy",
+  "type": "wait",
+  "durationMs": 5000,
+  "description": "Wait for deployment to propagate"
+}
+```
+
+Useful for waiting for external systems (e.g., waiting for a deployed URL to become live, rate limiting API calls, or giving services time to initialize).
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `durationMs` | `number` | required | Duration to wait in milliseconds |
+
+Wait step output includes:
+- `completed` - Whether the wait completed successfully (always `true` unless skipped)
+- `durationMs` - The duration that was waited
+
 ### HTTP Step
 Make HTTP requests:
 ```json
@@ -214,17 +357,98 @@ Read, write, or delete files:
 }
 ```
 
+### Iterator Step
+Iterate over an array and execute a step for each item (batch processing):
+
+```json
+{
+  "id": "lint-files",
+  "type": "iterator",
+  "items": "{{steps.find-files.result}}",
+  "runStep": {
+    "type": "shell",
+    "command": "eslint {{inputs.item}}"
+  }
+}
+```
+
+The iterator provides special context variables for each iteration:
+- `{{inputs.item}}` - The current item being processed
+- `{{inputs.index}}` - The zero-based index of the current item
+
+For objects in the array, access nested properties:
+```json
+{
+  "id": "deploy-services",
+  "type": "iterator",
+  "items": "{{inputs.services}}",
+  "runStep": {
+    "type": "shell",
+    "command": "deploy {{inputs.item.name}} --region {{inputs.item.region}}"
+  }
+}
+```
+
+The iterator step collects results from all iterations:
+```json
+{
+  "id": "use-results",
+  "type": "shell",
+  "command": "echo 'Processed {{steps.lint-files.count}} files'",
+  "after": ["lint-files"]
+}
+```
+
+Iterator step output includes:
+- `results` - Array of outputs from each iteration
+- `count` - Number of items processed
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `items` | `string` | Interpolation expression resolving to an array (required) |
+| `runStep` | `object` | Step definition to execute for each item (required). Supports shell, tool, agent, http, and file step types. |
+
+**Limitations:**
+- Nested iterators are not supported
+- Suspend steps are not supported within iterators
+
 ## Commands
 
 Use the `/workflow` command:
 
 - `/workflow list` - List available workflows
 - `/workflow show <id>` - Show workflow details
+- `/workflow graph <id>` - Show workflow DAG as Mermaid diagram
 - `/workflow run <id> [param=value ...]` - Run a workflow
 - `/workflow status <runId>` - Check run status
 - `/workflow resume <runId> [data]` - Resume a suspended workflow
 - `/workflow cancel <runId>` - Cancel a running workflow
 - `/workflow runs [workflowId]` - List recent runs
+
+### Visualizing Workflows
+
+The `graph` command generates a Mermaid diagram showing the workflow's step dependencies:
+
+```
+/workflow graph deploy-prod
+```
+
+Output:
+```mermaid
+graph TD
+  check-git["check-git (shell)"]
+  run-tests["run-tests (shell)"]
+  ask-approval([ask-approval (suspend)])
+  deploy-script["deploy-script (shell)"]
+  check-git --> run-tests
+  run-tests --> ask-approval
+  ask-approval --> deploy-script
+```
+
+Different step types are shown with distinct shapes:
+- **Rectangle** `["..."]` - shell, tool, http, file steps
+- **Stadium** `([...])` - suspend steps (human-in-the-loop)
+- **Hexagon** `{{...}}` - agent steps (LLM calls)
 
 ### Parameter Type Inference
 
@@ -349,9 +573,13 @@ After each step completes, the workflow state (including all step results) is sa
 
 This means you can safely restart OpenCode without losing workflow progress.
 
-## Triggers (Experimental)
+## Triggers
 
-Workflows can optionally define trigger configurations for future automation:
+Workflows can be automatically triggered by cron schedules or file change events.
+
+### Schedule Triggers (Cron)
+
+Use cron expressions to run workflows on a schedule:
 
 ```json
 {
@@ -359,21 +587,84 @@ Workflows can optionally define trigger configurations for future automation:
   "trigger": {
     "schedule": "0 2 * * *"
   },
-  "steps": [...]
+  "steps": [
+    {
+      "id": "backup",
+      "type": "shell",
+      "command": "backup.sh"
+    }
+  ]
 }
 ```
+
+Common cron patterns:
+| Pattern | Description |
+|---------|-------------|
+| `* * * * *` | Every minute |
+| `0 * * * *` | Every hour |
+| `0 0 * * *` | Daily at midnight |
+| `0 2 * * *` | Daily at 2am |
+| `0 0 * * 0` | Weekly on Sunday |
+| `*/5 * * * *` | Every 5 minutes |
+| `0 9-17 * * 1-5` | Every hour 9-5 Mon-Fri |
+
+### File Change Triggers
+
+Trigger workflows when files matching a glob pattern change:
 
 ```json
 {
-  "id": "on-push-deploy",
+  "id": "test-on-save",
   "trigger": {
-    "event": "git.push"
+    "event": "file.change",
+    "pattern": "src/**/*.ts"
   },
-  "steps": [...]
+  "steps": [
+    {
+      "id": "run-tests",
+      "type": "shell",
+      "command": "npm test"
+    }
+  ]
 }
 ```
 
-> **Note**: Trigger execution is not yet implemented. These fields are reserved for future functionality.
+The `changedFile` input is automatically passed to the workflow, containing the path of the file that triggered the workflow:
+
+```json
+{
+  "id": "lint-on-save",
+  "trigger": {
+    "event": "file.change",
+    "pattern": "**/*.{ts,tsx}"
+  },
+  "steps": [
+    {
+      "id": "lint",
+      "type": "shell",
+      "command": "eslint {{inputs.changedFile}}"
+    }
+  ]
+}
+```
+
+Glob pattern examples:
+| Pattern | Matches |
+|---------|---------|
+| `**/*.ts` | All TypeScript files |
+| `src/**/*.{ts,tsx}` | TypeScript files in src/ |
+| `*.json` | JSON files in root |
+| `src/components/**/*` | Everything in components/ |
+
+File change triggers are debounced (300ms) to prevent rapid repeated executions when multiple file system events fire for a single save operation.
+
+### Trigger Configuration
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `schedule` | `string` | Cron expression for scheduled execution |
+| `event` | `string` | Event type (currently only `file.change` is supported) |
+| `pattern` | `string` | Glob pattern for file matching (used with `file.change` event) |
 
 ## Agent Orchestration
 
@@ -389,11 +680,7 @@ This example chains multiple specialized agents to review code from different pe
   "name": "Multi-Agent Code Review",
   "description": "Parallel expert review with synthesis",
   "inputs": {
-    "file": {
-      "type": "string",
-      "description": "File path to review",
-      "required": true
-    }
+    "file": "string"
   },
   "steps": [
     {

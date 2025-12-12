@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { MissingInputsError } from "../types.js";
 import type { WorkflowRun, Logger, WorkflowInputs, JsonValue, StepOutput, StepResult } from "../types.js";
 import type { WorkflowFactory, WorkflowFactoryResult } from "../factory/index.js";
 import type { WorkflowStorage } from "../storage/index.js";
@@ -35,7 +36,7 @@ interface MastraWorkflowResult {
  * Interface for Mastra Run object
  */
 interface MastraRun {
-  start: (opts: { inputData: { inputs: WorkflowInputs; steps: Record<string, StepOutput> } }) => Promise<MastraWorkflowResult>;
+  start: (opts: { inputData: { inputs: WorkflowInputs; steps: Record<string, StepOutput>; secretInputs?: string[] } }) => Promise<MastraWorkflowResult>;
   resume?: (opts: { stepId: string; data?: JsonValue }) => Promise<MastraWorkflowResult>;
 }
 
@@ -63,14 +64,31 @@ function extractStepOutputs(stepResults: Record<string, StepResult>): Record<str
 }
 
 /**
- * Create a timeout promise that rejects after the specified duration
+ * Result from createTimeoutPromise including cleanup function
  */
-function createTimeoutPromise(timeoutMs: number, workflowId: string): Promise<never> {
-  return new Promise((_, reject) => {
-    setTimeout(() => {
+interface TimeoutPromiseResult {
+  promise: Promise<never>;
+  clear: () => void;
+}
+
+/**
+ * Create a timeout promise that rejects after the specified duration.
+ * Returns both the promise and a cleanup function to prevent memory leaks.
+ */
+function createTimeoutPromise(timeoutMs: number, workflowId: string): TimeoutPromiseResult {
+  let timeoutId: NodeJS.Timeout;
+  
+  const promise = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => {
       reject(new Error(`Workflow '${workflowId}' timed out after ${timeoutMs}ms`));
     }, timeoutMs);
   });
+  
+  const clear = () => {
+    clearTimeout(timeoutId);
+  };
+  
+  return { promise, clear };
 }
 
 /**
@@ -200,6 +218,19 @@ export class WorkflowRunner {
       throw new Error(`Workflow not found: ${workflowId}`);
     }
 
+    // Validate required inputs
+    if (compiled.inputSchema && Object.keys(compiled.inputSchema).length > 0) {
+      const missingInputs: string[] = [];
+      for (const inputName of Object.keys(compiled.inputSchema)) {
+        if (!(inputName in inputs) || inputs[inputName] === undefined || inputs[inputName] === "") {
+          missingInputs.push(inputName);
+        }
+      }
+      if (missingInputs.length > 0) {
+        throw new MissingInputsError(workflowId, missingInputs, compiled.inputSchema);
+      }
+    }
+
     const runId = randomUUID();
     const run: WorkflowRun = {
       runId,
@@ -248,18 +279,26 @@ export class WorkflowRunner {
       this.mastraRuns.set(runId, mastraRun);
 
       // Start the workflow with input data, with timeout
+      // Include secretInputs so step adapters know which inputs to mask in logs
       const startPromise = mastraRun.start({
         inputData: {
           inputs,
           steps: {},
+          secretInputs: compiled.secrets || [],
         },
       });
 
-      // Race against timeout
-      const result = await Promise.race([
-        startPromise,
-        createTimeoutPromise(this.timeout, compiled.id),
-      ]);
+      // Race against timeout with proper cleanup to prevent memory leaks
+      const timeout = createTimeoutPromise(this.timeout, compiled.id);
+      let result: MastraWorkflowResult;
+      try {
+        result = await Promise.race([
+          startPromise,
+          timeout.promise,
+        ]);
+      } finally {
+        timeout.clear();
+      }
 
       // Check for suspend
       if (result.status === "suspended") {
@@ -368,6 +407,7 @@ export class WorkflowRunner {
           inputData: {
             inputs: run.inputs,
             steps: previousOutputs,
+            secretInputs: compiled.secrets || [],
           },
         });
       }

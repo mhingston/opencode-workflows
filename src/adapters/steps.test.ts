@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { OpencodeClient } from "../types.js";
 
 // Use vi.hoisted to create mocks that can be used in vi.mock factories
@@ -41,8 +41,10 @@ import {
   createToolStep,
   createAgentStep,
   createSuspendStep,
+  createWaitStep,
   createHttpStep,
   createFileStep,
+  createIteratorStep,
 } from "./steps.js";
 import { readFile, writeFile, unlink } from "node:fs/promises";
 
@@ -1412,6 +1414,511 @@ describe("Step Adapters", () => {
 
         expect(result).toEqual({ skipped: true });
         expect(writeFile).not.toHaveBeenCalled();
+      });
+    });
+  });
+
+  // =============================================================================
+  // Wait Step Tests
+  // =============================================================================
+  describe("createWaitStep", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    describe("idempotency check", () => {
+      it("should skip execution when step result already exists", async () => {
+        const step = createWaitStep({
+          id: "wait-step",
+          type: "wait",
+          durationMs: 5000,
+        });
+
+        const previousResult = {
+          completed: true,
+          durationMs: 5000,
+        };
+
+        const result = await step.execute({
+          inputData: {
+            inputs: {},
+            steps: {
+              "wait-step": previousResult,
+            },
+          },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result).toEqual(previousResult);
+      });
+    });
+
+    describe("wait execution", () => {
+      it("should wait for specified duration and return completed", async () => {
+        const step = createWaitStep({
+          id: "wait-5s",
+          type: "wait",
+          durationMs: 5000,
+        });
+
+        const executePromise = step.execute({
+          inputData: { inputs: {}, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        // Fast-forward timer
+        await vi.advanceTimersByTimeAsync(5000);
+
+        const result = await executePromise;
+
+        expect(result).toEqual({
+          completed: true,
+          durationMs: 5000,
+        });
+      });
+
+      it("should handle short wait durations", async () => {
+        const step = createWaitStep({
+          id: "wait-100ms",
+          type: "wait",
+          durationMs: 100,
+        });
+
+        const executePromise = step.execute({
+          inputData: { inputs: {}, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        await vi.advanceTimersByTimeAsync(100);
+
+        const result = await executePromise;
+
+        expect(result).toEqual({
+          completed: true,
+          durationMs: 100,
+        });
+      });
+
+      it("should have correct description", () => {
+        const step = createWaitStep({
+          id: "wait-step",
+          type: "wait",
+          durationMs: 3000,
+        });
+
+        expect(step.description).toBe("Wait 3000ms");
+      });
+
+      it("should use custom description when provided", () => {
+        const step = createWaitStep({
+          id: "wait-step",
+          type: "wait",
+          durationMs: 3000,
+          description: "Wait for deployment to complete",
+        });
+
+        expect(step.description).toBe("Wait for deployment to complete");
+      });
+    });
+
+    describe("condition evaluation", () => {
+      it("should skip when condition is false", async () => {
+        const step = createWaitStep({
+          id: "conditional-wait",
+          type: "wait",
+          durationMs: 5000,
+          condition: "{{inputs.shouldWait}}",
+        });
+
+        const result = await step.execute({
+          inputData: { inputs: { shouldWait: "false" }, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result).toEqual({
+          completed: false,
+          durationMs: 0,
+          skipped: true,
+        });
+      });
+
+      it("should execute when condition is true", async () => {
+        const step = createWaitStep({
+          id: "conditional-wait",
+          type: "wait",
+          durationMs: 1000,
+          condition: "{{inputs.shouldWait}}",
+        });
+
+        const executePromise = step.execute({
+          inputData: { inputs: { shouldWait: "true" }, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        await vi.advanceTimersByTimeAsync(1000);
+
+        const result = await executePromise;
+
+        expect(result).toEqual({
+          completed: true,
+          durationMs: 1000,
+        });
+      });
+
+      it("should skip when condition evaluates to empty string", async () => {
+        const step = createWaitStep({
+          id: "wait",
+          type: "wait",
+          durationMs: 1000,
+          condition: "{{inputs.empty}}",
+        });
+
+        const result = await step.execute({
+          inputData: { inputs: { empty: "" }, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result.skipped).toBe(true);
+      });
+
+      it("should skip when condition evaluates to 0", async () => {
+        const step = createWaitStep({
+          id: "wait",
+          type: "wait",
+          durationMs: 1000,
+          condition: "{{inputs.zero}}",
+        });
+
+        const result = await step.execute({
+          inputData: { inputs: { zero: "0" }, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result.skipped).toBe(true);
+      });
+    });
+  });
+
+  // =============================================================================
+  // Iterator Step Tests
+  // =============================================================================
+  describe("createIteratorStep", () => {
+    describe("idempotency check", () => {
+      it("should skip execution when step result already exists", async () => {
+        const step = createIteratorStep(
+          {
+            id: "iterator-step",
+            type: "iterator",
+            items: "{{inputs.files}}",
+            runStep: {
+              type: "shell",
+              command: "echo {{inputs.item}}",
+            },
+          },
+          mockClient
+        );
+
+        const previousResult = {
+          results: [{ stdout: "file1", stderr: "", exitCode: 0 }],
+          count: 1,
+        };
+
+        const result = await step.execute({
+          inputData: {
+            inputs: { files: ["file1.txt"] },
+            steps: {
+              "iterator-step": previousResult,
+            },
+          },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result).toEqual(previousResult);
+        expect(mockExecAsync).not.toHaveBeenCalled();
+        expect(mockClient.app.log).toHaveBeenCalledWith(
+          "Skipping already-completed step: iterator-step",
+          "info"
+        );
+      });
+    });
+
+    describe("iteration execution", () => {
+      it("should iterate over array and execute runStep for each item", async () => {
+        mockExecAsync.mockResolvedValue({ stdout: "processed", stderr: "" });
+        const step = createIteratorStep(
+          {
+            id: "lint-files",
+            type: "iterator",
+            items: "{{inputs.files}}",
+            runStep: {
+              type: "shell",
+              command: "eslint {{inputs.item}}",
+            },
+          },
+          mockClient
+        );
+
+        const result = await step.execute({
+          inputData: {
+            inputs: { files: ["src/a.ts", "src/b.ts", "src/c.ts"] },
+            steps: {},
+          },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result.count).toBe(3);
+        expect(result.results).toHaveLength(3);
+        expect(mockExecAsync).toHaveBeenCalledTimes(3);
+        expect(mockExecAsync).toHaveBeenCalledWith("eslint src/a.ts", expect.any(Object));
+        expect(mockExecAsync).toHaveBeenCalledWith("eslint src/b.ts", expect.any(Object));
+        expect(mockExecAsync).toHaveBeenCalledWith("eslint src/c.ts", expect.any(Object));
+      });
+
+      it("should provide index in iteration context", async () => {
+        mockExecAsync.mockResolvedValue({ stdout: "done", stderr: "" });
+        const step = createIteratorStep(
+          {
+            id: "numbered",
+            type: "iterator",
+            items: "{{inputs.items}}",
+            runStep: {
+              type: "shell",
+              command: "echo Item {{inputs.index}}: {{inputs.item}}",
+            },
+          },
+          mockClient
+        );
+
+        await step.execute({
+          inputData: {
+            inputs: { items: ["apple", "banana"] },
+            steps: {},
+          },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(mockExecAsync).toHaveBeenCalledWith("echo Item 0: apple", expect.any(Object));
+        expect(mockExecAsync).toHaveBeenCalledWith("echo Item 1: banana", expect.any(Object));
+      });
+
+      it("should iterate over array from previous step result", async () => {
+        mockExecAsync.mockResolvedValue({ stdout: "linted", stderr: "" });
+        const step = createIteratorStep(
+          {
+            id: "lint-found-files",
+            type: "iterator",
+            items: "{{steps.find-files.result}}",
+            runStep: {
+              type: "shell",
+              command: "lint {{inputs.item}}",
+            },
+          },
+          mockClient
+        );
+
+        const result = await step.execute({
+          inputData: {
+            inputs: {},
+            steps: {
+              "find-files": { result: ["file1.ts", "file2.ts"] },
+            },
+          },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result.count).toBe(2);
+        expect(mockExecAsync).toHaveBeenCalledWith("lint file1.ts", expect.any(Object));
+        expect(mockExecAsync).toHaveBeenCalledWith("lint file2.ts", expect.any(Object));
+      });
+
+      it("should handle objects in the array", async () => {
+        mockExecAsync.mockResolvedValue({ stdout: "deployed", stderr: "" });
+        const step = createIteratorStep(
+          {
+            id: "deploy-services",
+            type: "iterator",
+            items: "{{inputs.services}}",
+            runStep: {
+              type: "shell",
+              command: "deploy {{inputs.item.name}} to {{inputs.item.region}}",
+            },
+          },
+          mockClient
+        );
+
+        await step.execute({
+          inputData: {
+            inputs: {
+              services: [
+                { name: "api", region: "us-east" },
+                { name: "web", region: "eu-west" },
+              ],
+            },
+            steps: {},
+          },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(mockExecAsync).toHaveBeenCalledWith("deploy api to us-east", expect.any(Object));
+        expect(mockExecAsync).toHaveBeenCalledWith("deploy web to eu-west", expect.any(Object));
+      });
+
+      it("should handle empty array", async () => {
+        const step = createIteratorStep(
+          {
+            id: "empty-iter",
+            type: "iterator",
+            items: "{{inputs.items}}",
+            runStep: {
+              type: "shell",
+              command: "echo {{inputs.item}}",
+            },
+          },
+          mockClient
+        );
+
+        const result = await step.execute({
+          inputData: {
+            inputs: { items: [] },
+            steps: {},
+          },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result.count).toBe(0);
+        expect(result.results).toHaveLength(0);
+        expect(mockExecAsync).not.toHaveBeenCalled();
+      });
+
+      it("should execute tool runStep for each item", async () => {
+        const step = createIteratorStep(
+          {
+            id: "process-files",
+            type: "iterator",
+            items: "{{inputs.files}}",
+            runStep: {
+              type: "tool",
+              tool: "testTool",
+              args: { path: "{{inputs.item}}" },
+            },
+          },
+          mockClient
+        );
+
+        const result = await step.execute({
+          inputData: {
+            inputs: { files: ["/tmp/a.txt", "/tmp/b.txt"] },
+            steps: {},
+          },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result.count).toBe(2);
+        expect(mockClient.tools.testTool.execute).toHaveBeenCalledTimes(2);
+        expect(mockClient.tools.testTool.execute).toHaveBeenCalledWith({ path: "/tmp/a.txt" });
+        expect(mockClient.tools.testTool.execute).toHaveBeenCalledWith({ path: "/tmp/b.txt" });
+      });
+    });
+
+    describe("error handling", () => {
+      it("should throw error when items does not resolve to array", async () => {
+        const step = createIteratorStep(
+          {
+            id: "bad-items",
+            type: "iterator",
+            items: "{{inputs.notAnArray}}",
+            runStep: {
+              type: "shell",
+              command: "echo test",
+            },
+          },
+          mockClient
+        );
+
+        await expect(
+          step.execute({
+            inputData: {
+              inputs: { notAnArray: "just a string" },
+              steps: {},
+            },
+          } as unknown as Parameters<typeof step.execute>[0])
+        ).rejects.toThrow("Iterator items must resolve to an array");
+      });
+
+      it("should propagate errors from runStep", async () => {
+        mockExecAsync.mockRejectedValue(
+          Object.assign(new Error("Command failed"), { code: 1, stderr: "error", stdout: "" })
+        );
+        const step = createIteratorStep(
+          {
+            id: "failing-iter",
+            type: "iterator",
+            items: "{{inputs.items}}",
+            runStep: {
+              type: "shell",
+              command: "fail-command",
+            },
+          },
+          mockClient
+        );
+
+        await expect(
+          step.execute({
+            inputData: {
+              inputs: { items: ["a"] },
+              steps: {},
+            },
+          } as unknown as Parameters<typeof step.execute>[0])
+        ).rejects.toThrow("Command failed");
+      });
+    });
+
+    describe("condition evaluation", () => {
+      it("should skip when condition is false", async () => {
+        const step = createIteratorStep(
+          {
+            id: "conditional-iter",
+            type: "iterator",
+            items: "{{inputs.items}}",
+            runStep: {
+              type: "shell",
+              command: "echo {{inputs.item}}",
+            },
+            condition: "{{inputs.shouldRun}}",
+          },
+          mockClient
+        );
+
+        const result = await step.execute({
+          inputData: {
+            inputs: { items: ["a", "b"], shouldRun: "false" },
+            steps: {},
+          },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result).toEqual({
+          results: [],
+          count: 0,
+          skipped: true,
+        });
+        expect(mockExecAsync).not.toHaveBeenCalled();
+      });
+
+      it("should execute when condition is true", async () => {
+        mockExecAsync.mockResolvedValue({ stdout: "done", stderr: "" });
+        const step = createIteratorStep(
+          {
+            id: "conditional-iter",
+            type: "iterator",
+            items: "{{inputs.items}}",
+            runStep: {
+              type: "shell",
+              command: "echo {{inputs.item}}",
+            },
+            condition: "{{inputs.shouldRun}}",
+          },
+          mockClient
+        );
+
+        const result = await step.execute({
+          inputData: {
+            inputs: { items: ["a"], shouldRun: "true" },
+            steps: {},
+          },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result.count).toBe(1);
+        expect(mockExecAsync).toHaveBeenCalled();
       });
     });
   });

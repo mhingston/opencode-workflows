@@ -1,3 +1,4 @@
+import { MissingInputsError } from "../types.js";
 import type { WorkflowDefinition, WorkflowRun, Logger, JsonValue, InputValue } from "../types.js";
 import type { WorkflowFactory } from "../factory/index.js";
 import type { WorkflowRunner } from "./runner.js";
@@ -121,6 +122,43 @@ function formatWorkflowDetails(def: WorkflowDefinition): string {
 }
 
 /**
+ * Generate a Mermaid diagram representing the workflow DAG
+ */
+function generateMermaidGraph(def: WorkflowDefinition): string {
+  const lines = ["graph TD"];
+
+  // Add nodes with appropriate shapes based on step type
+  for (const step of def.steps) {
+    let nodeShape: string;
+    switch (step.type) {
+      case "suspend":
+        // Stadium shape (rounded) for suspend steps
+        nodeShape = `([${step.id} (${step.type})])`;
+        break;
+      case "agent":
+        // Hexagon shape for agent steps
+        nodeShape = `{{${step.id} (${step.type})}}`;
+        break;
+      default:
+        // Rectangle for shell, tool, http, file steps
+        nodeShape = `["${step.id} (${step.type})"]`;
+    }
+    lines.push(`  ${step.id}${nodeShape}`);
+  }
+
+  // Add edges based on dependencies
+  for (const step of def.steps) {
+    if (step.after && step.after.length > 0) {
+      for (const dep of step.after) {
+        lines.push(`  ${dep} --> ${step.id}`);
+      }
+    }
+  }
+
+  return `\`\`\`mermaid\n${lines.join("\n")}\n\`\`\``;
+}
+
+/**
  * Format run status for display
  */
 function formatRunStatus(run: WorkflowRun): string {
@@ -231,6 +269,16 @@ export async function handleWorkflowCommand(
           data: { runId, workflowId, params },
         };
       } catch (error) {
+        // Handle missing inputs with a helpful message
+        if (error instanceof MissingInputsError) {
+          const inputList = error.missingInputs
+            .map(name => `- **${name}** (${error.inputSchema[name]})`)
+            .join("\n");
+          return {
+            success: false,
+            message: `Missing required input(s) for workflow **${workflowId}**:\n\n${inputList}\n\nUsage: \`/workflow run ${workflowId} ${error.missingInputs.map(n => `${n}=<value>`).join(" ")}\``,
+          };
+        }
         return {
           success: false,
           message: `Failed to start workflow: ${error}`,
@@ -321,6 +369,30 @@ export async function handleWorkflowCommand(
       }
     }
 
+    case "graph": {
+      const workflowId = rest[0];
+      if (!workflowId) {
+        return {
+          success: false,
+          message: "Usage: /workflow graph <workflow-id>",
+        };
+      }
+
+      const def = ctx.definitions.get(workflowId);
+      if (!def) {
+        return {
+          success: false,
+          message: `Workflow not found: ${workflowId}`,
+        };
+      }
+
+      return {
+        success: true,
+        message: generateMermaidGraph(def),
+        data: def,
+      };
+    }
+
     case "runs": {
       const workflowId = rest[0];
       const runs = ctx.runner.listRuns(workflowId);
@@ -355,6 +427,7 @@ export async function handleWorkflowCommand(
 
 - \`/workflow list\` - List available workflows
 - \`/workflow show <id>\` - Show workflow details
+- \`/workflow graph <id>\` - Show workflow DAG as Mermaid diagram
 - \`/workflow run <id> [param=value ...]\` - Run a workflow
 - \`/workflow status <runId>\` - Check run status
 - \`/workflow resume <runId> [data]\` - Resume a suspended workflow

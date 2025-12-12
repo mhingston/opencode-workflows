@@ -60,8 +60,10 @@ export type {
   SuspendStepDefinition,
   HttpStepDefinition,
   FileStepDefinition,
+  WaitStepDefinition,
   StepDefinition,
   WorkflowDefinition,
+  WorkflowTrigger,
   WorkflowRunStatus,
   ShellStepOutput,
   ToolStepOutput,
@@ -69,6 +71,8 @@ export type {
   SuspendStepOutput,
   HttpStepOutput,
   FileStepOutput,
+  WaitStepOutput,
+  IteratorStepOutput,
   StepOutput,
   StepResult,
   WorkflowRun,
@@ -82,13 +86,17 @@ export type {
 
 // Zod schemas for validation (consumers may want to validate workflow definitions)
 export {
+  JsonValueSchema,
   BaseStepSchema,
   ShellStepSchema,
   ToolStepSchema,
   AgentStepSchema,
   SuspendStepSchema,
+  WaitStepSchema,
   HttpStepSchema,
   FileStepSchema,
+  IteratorStepSchema,
   StepSchema,
+  WorkflowTriggerSchema,
   WorkflowDefinitionSchema,
 } from "./types.js";

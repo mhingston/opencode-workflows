@@ -14,6 +14,7 @@
  */
 
 import type { JsonValue } from "../types.js";
+import { isSecretExpression, maskInterpolatedString, SECRET_MASK } from "./secrets.js";
 
 // =============================================================================
 // Constants
@@ -258,4 +259,99 @@ export function interpolateValue(template: string, ctx: InterpolationContext): J
 
   // Otherwise, perform string interpolation (returns string)
   return interpolate(template, ctx);
+}
+
+// =============================================================================
+// Secrets-Aware Interpolation
+// =============================================================================
+
+/**
+ * Result from secrets-aware interpolation
+ */
+export interface SecretAwareInterpolationResult {
+  /** The actual interpolated value (contains real secret values) */
+  value: string;
+  /** A masked version safe for logging (secrets replaced with ***) */
+  masked: string;
+  /** Whether this value contains any secrets */
+  containsSecrets: boolean;
+  /** Map of secret expressions to their actual values (for reference) */
+  secretValues: Map<string, string>;
+}
+
+/**
+ * Interpolate a template while tracking secret values for masking.
+ * 
+ * This function returns both the actual interpolated value and a masked
+ * version that's safe for logging. Environment variables are always treated
+ * as secrets, and inputs listed in the secretInputs array are also masked.
+ * 
+ * @param template - Template string with {{expression}} placeholders
+ * @param ctx - Interpolation context
+ * @param secretInputs - Array of input names that should be treated as secrets
+ * @returns Object with actual value, masked value, and secrets metadata
+ */
+export function interpolateWithSecrets(
+  template: string,
+  ctx: InterpolationContext,
+  secretInputs: string[] = []
+): SecretAwareInterpolationResult {
+  const pattern = new RegExp(INTERPOLATION_PATTERN.source, "g");
+  const secretValues = new Map<string, string>();
+  let hasSecrets = false;
+  
+  // First pass: collect secret values
+  for (const match of template.matchAll(pattern)) {
+    const expression = match[1].trim();
+    
+    if (isSecretExpression(expression, secretInputs)) {
+      const result = parseExpression(expression, ctx);
+      if (result.found && result.value !== undefined && result.value !== null) {
+        const stringValue = formatValue(result.value);
+        secretValues.set(expression, stringValue);
+        hasSecrets = true;
+      }
+    }
+  }
+  
+  // Perform actual interpolation
+  const value = interpolate(template, ctx);
+  
+  // Create masked version
+  const masked = hasSecrets 
+    ? maskInterpolatedString(value, secretValues)
+    : value;
+  
+  return {
+    value,
+    masked,
+    containsSecrets: hasSecrets,
+    secretValues,
+  };
+}
+
+/**
+ * Create a masked version of an already-interpolated command string.
+ * 
+ * This is useful when you have the interpolated value and a list of secret
+ * values that should be masked. It replaces all occurrences of any secret
+ * value with the SECRET_MASK.
+ * 
+ * @param interpolated - The interpolated string containing actual secret values
+ * @param secretValues - Array of secret values to mask
+ * @returns Masked version of the string
+ */
+export function maskSecrets(interpolated: string, secretValues: string[]): string {
+  let masked = interpolated;
+  
+  // Sort by length (longest first) to handle overlapping values correctly
+  const sortedSecrets = [...secretValues].sort((a, b) => b.length - a.length);
+  
+  for (const value of sortedSecrets) {
+    if (value && value.length > 0) {
+      masked = masked.split(value).join(SECRET_MASK);
+    }
+  }
+  
+  return masked;
 }

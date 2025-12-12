@@ -12,6 +12,7 @@ import {
   createSuspendStep,
   createHttpStep,
   createFileStep,
+  createIteratorStep,
 } from "../adapters/index.js";
 import { topologicalSort } from "../loader/index.js";
 
@@ -26,6 +27,10 @@ export interface WorkflowFactoryResult {
   workflow: unknown;
   id: string;
   description?: string;
+  /** Input schema for the workflow (maps param name to type) */
+  inputSchema?: Record<string, "string" | "number" | "boolean">;
+  /** List of input names that are marked as secrets */
+  secrets?: string[];
 }
 
 /**
@@ -73,6 +78,8 @@ function createMastraStep(def: StepDefinition, client: OpencodeClient): unknown 
       return createHttpStep(def);
     case "file":
       return createFileStep(def);
+    case "iterator":
+      return createIteratorStep(def, client);
     default:
       throw new Error(`Unknown step type: ${(def as StepDefinition).type}`);
   }
@@ -204,6 +211,7 @@ export function createWorkflowFromDefinition(
     inputSchema: z.object({
       inputs: inputSchema,
       steps: z.record(z.unknown()).default({}),
+      secretInputs: z.array(z.string()).optional(),
     }),
     outputSchema: z.object({
       success: z.boolean(),
@@ -238,6 +246,8 @@ export function createWorkflowFromDefinition(
     workflow,
     id: definition.id,
     description: definition.description,
+    inputSchema: definition.inputs,
+    secrets: definition.secrets,
   };
 }
 

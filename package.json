@@ -33,11 +33,15 @@
     "@mastra/core": "^0.24.0",
     "@mastra/libsql": "^0.16.0",
     "@opencode-ai/plugin": "^1.0.147",
+    "minimatch": "^10.1.1",
+    "node-cron": "^4.2.1",
     "strip-json-comments": "^5.0.3",
     "zod": "^3.25.0"
   },
   "devDependencies": {
+    "@types/minimatch": "^5.1.2",
     "@types/node": "^22.0.0",
+    "@types/node-cron": "^3.0.11",
     "@vitest/coverage-v8": "^2.1.9",
     "tsup": "^8.0.0",
     "typescript": "^5.7.0",

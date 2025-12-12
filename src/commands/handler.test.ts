@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { handleWorkflowCommand, type WorkflowCommandContext } from "./handler.js";
+import { MissingInputsError } from "../types.js";
 import type { WorkflowDefinition, WorkflowRun, Logger } from "../types.js";
 import type { WorkflowFactory } from "../factory/index.js";
 import type { WorkflowRunner } from "./runner.js";
@@ -211,6 +212,40 @@ describe("handleWorkflowCommand", () => {
       expect(result.success).toBe(false);
       expect(result.message).toContain("Failed to start workflow");
     });
+
+    it("should format MissingInputsError with helpful message", async () => {
+      const error = new MissingInputsError(
+        "deploy",
+        ["version", "count"],
+        { version: "string", count: "number", enabled: "boolean" }
+      );
+      vi.mocked(mockRunner.run).mockRejectedValue(error);
+
+      const result = await handleWorkflowCommand("run deploy enabled=true", mockCtx);
+
+      expect(result.success).toBe(false);
+      expect(result.message).toContain("Missing required input(s)");
+      expect(result.message).toContain("**version** (string)");
+      expect(result.message).toContain("**count** (number)");
+      expect(result.message).toContain("Usage:");
+      expect(result.message).toContain("version=<value>");
+      expect(result.message).toContain("count=<value>");
+    });
+
+    it("should show single missing input correctly", async () => {
+      const error = new MissingInputsError(
+        "deploy",
+        ["version"],
+        { version: "string" }
+      );
+      vi.mocked(mockRunner.run).mockRejectedValue(error);
+
+      const result = await handleWorkflowCommand("run deploy", mockCtx);
+
+      expect(result.success).toBe(false);
+      expect(result.message).toContain("**version** (string)");
+      expect(result.message).toContain("/workflow run deploy version=<value>");
+    });
   });
 
   describe("status command", () => {
@@ -400,6 +435,119 @@ describe("handleWorkflowCommand", () => {
     });
   });
 
+  describe("graph command", () => {
+    beforeEach(() => {
+      definitions.set("deploy", {
+        id: "deploy",
+        description: "Deploy to production",
+        steps: [
+          { id: "build", type: "shell", command: "npm run build" },
+          { id: "test", type: "shell", command: "npm test", after: ["build"] },
+          { id: "approve", type: "suspend", message: "Approve deployment?", after: ["test"] },
+          { id: "deploy", type: "shell", command: "deploy.sh", after: ["approve"] },
+        ],
+      });
+    });
+
+    it("should generate mermaid diagram for workflow", async () => {
+      const result = await handleWorkflowCommand("graph deploy", mockCtx);
+
+      expect(result.success).toBe(true);
+      expect(result.message).toContain("```mermaid");
+      expect(result.message).toContain("graph TD");
+      expect(result.message).toContain("build");
+      expect(result.message).toContain("test");
+      expect(result.message).toContain("approve");
+      expect(result.message).toContain("deploy");
+      expect(result.message).toContain("```");
+    });
+
+    it("should include edges for dependencies", async () => {
+      const result = await handleWorkflowCommand("graph deploy", mockCtx);
+
+      expect(result.success).toBe(true);
+      expect(result.message).toContain("build --> test");
+      expect(result.message).toContain("test --> approve");
+      expect(result.message).toContain("approve --> deploy");
+    });
+
+    it("should use different shapes for step types", async () => {
+      const result = await handleWorkflowCommand("graph deploy", mockCtx);
+
+      expect(result.success).toBe(true);
+      // Shell steps use rectangle shape
+      expect(result.message).toContain('build["build (shell)"]');
+      // Suspend steps use stadium shape
+      expect(result.message).toContain("approve([approve (suspend)])");
+    });
+
+    it("should use hexagon shape for agent steps", async () => {
+      definitions.set("agent-workflow", {
+        id: "agent-workflow",
+        steps: [
+          { id: "analyze", type: "agent", prompt: "Analyze this code" },
+        ],
+      });
+
+      const result = await handleWorkflowCommand("graph agent-workflow", mockCtx);
+
+      expect(result.success).toBe(true);
+      expect(result.message).toContain("analyze{{analyze (agent)}}");
+    });
+
+    it("should return error for missing workflow id", async () => {
+      const result = await handleWorkflowCommand("graph", mockCtx);
+
+      expect(result.success).toBe(false);
+      expect(result.message).toContain("Usage:");
+    });
+
+    it("should return error for unknown workflow", async () => {
+      const result = await handleWorkflowCommand("graph unknown", mockCtx);
+
+      expect(result.success).toBe(false);
+      expect(result.message).toContain("Workflow not found");
+    });
+
+    it("should handle workflow with no dependencies", async () => {
+      definitions.set("simple", {
+        id: "simple",
+        steps: [
+          { id: "step1", type: "shell", command: "echo 1" },
+          { id: "step2", type: "shell", command: "echo 2" },
+        ],
+      });
+
+      const result = await handleWorkflowCommand("graph simple", mockCtx);
+
+      expect(result.success).toBe(true);
+      expect(result.message).toContain("step1");
+      expect(result.message).toContain("step2");
+      // No edges since no dependencies
+      expect(result.message).not.toContain("-->");
+    });
+
+    it("should handle workflow with multiple dependencies", async () => {
+      definitions.set("parallel", {
+        id: "parallel",
+        steps: [
+          { id: "init", type: "shell", command: "init" },
+          { id: "taskA", type: "shell", command: "taskA", after: ["init"] },
+          { id: "taskB", type: "shell", command: "taskB", after: ["init"] },
+          { id: "merge", type: "shell", command: "merge", after: ["taskA", "taskB"] },
+        ],
+      });
+
+      const result = await handleWorkflowCommand("graph parallel", mockCtx);
+
+      expect(result.success).toBe(true);
+      expect(result.message).toContain("init --> taskA");
+      expect(result.message).toContain("init --> taskB");
+      expect(result.message).toContain("taskA --> merge");
+      expect(result.message).toContain("taskB --> merge");
+    });
+  });
+
   describe("help command", () => {
     it("should show help text", async () => {
       const result = await handleWorkflowCommand("help", mockCtx);
@@ -410,6 +558,7 @@ describe("handleWorkflowCommand", () => {
       expect(result.message).toContain("/workflow status");
       expect(result.message).toContain("/workflow resume");
       expect(result.message).toContain("/workflow cancel");
+      expect(result.message).toContain("/workflow graph");
     });
 
     it("should show help for empty input", async () => {

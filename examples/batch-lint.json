@@ -1,0 +1,40 @@
+{
+  "id": "batch-lint",
+  "name": "Batch Lint Files",
+  "description": "Demonstrates the iterator step by linting multiple files found by a pattern",
+  "inputs": {
+    "pattern": "string"
+  },
+  "steps": [
+    {
+      "id": "find-files",
+      "type": "shell",
+      "command": "find . -name '{{inputs.pattern}}' -type f | head -20",
+      "description": "Find files matching the pattern"
+    },
+    {
+      "id": "parse-files",
+      "type": "agent",
+      "prompt": "Parse this newline-separated list of file paths into a JSON array of strings. Return ONLY the JSON array, no explanation:\n\n{{steps.find-files.stdout}}",
+      "description": "Convert file list to JSON array",
+      "after": ["find-files"]
+    },
+    {
+      "id": "lint-each-file",
+      "type": "iterator",
+      "description": "Run linter on each found file",
+      "items": "{{steps.parse-files.response}}",
+      "runStep": {
+        "type": "shell",
+        "command": "echo 'Linting {{inputs.item}}...' && cat {{inputs.item}} | head -5"
+      },
+      "after": ["parse-files"]
+    },
+    {
+      "id": "summary",
+      "type": "shell",
+      "command": "echo 'Successfully processed {{steps.lint-each-file.count}} files'",
+      "after": ["lint-each-file"]
+    }
+  ]
+}

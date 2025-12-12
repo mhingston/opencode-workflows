@@ -9,13 +9,17 @@ import type {
   ToolStepDefinition,
   AgentStepDefinition,
   SuspendStepDefinition,
+  WaitStepDefinition,
   HttpStepDefinition,
   FileStepDefinition,
+  IteratorStepDefinition,
+  StepDefinition,
   OpencodeClient,
   JsonValue,
   JsonObject,
 } from "../types.js";
-import { interpolate, interpolateValue } from "./interpolation.js";
+import { JsonValueSchema } from "../types.js";
+import { interpolate, interpolateValue, interpolateWithSecrets } from "./interpolation.js";
 
 const execAsync = promisify(exec);
 
@@ -140,25 +144,13 @@ function validateUrlForSSRF(urlString: string): string {
 }
 
 /**
- * Zod schema for JSON values (recursive)
- */
-const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
-  z.union([
-    z.string(),
-    z.number(),
-    z.boolean(),
-    z.null(),
-    z.array(JsonValueSchema),
-    z.record(JsonValueSchema),
-  ])
-);
-
-/**
- * Input schema for step execution context
+ * Input schema for step execution context.
+ * Includes optional secretInputs array for masking sensitive values in logs.
  */
 const StepInputSchema = z.object({
   inputs: z.record(z.union([z.string(), z.number(), z.boolean()])),
   steps: z.record(JsonValueSchema),
+  secretInputs: z.array(z.string()).optional(),
 });
 
 type StepInput = z.infer<typeof StepInputSchema>;
@@ -188,6 +180,7 @@ export function createShellStep(def: ShellStepDefinition, client: OpencodeClient
     outputSchema: ShellOutputSchema,
     execute: async ({ inputData }) => {
       const data = inputData as StepInput;
+      const secretInputs = data.secretInputs || [];
 
       // IDEMPOTENCY CHECK: Skip if this step was already executed (hydration scenario)
       // This prevents re-execution of side-effects (e.g., deployments) when resuming after restart
@@ -216,17 +209,17 @@ export function createShellStep(def: ShellStepDefinition, client: OpencodeClient
         }
       }
 
-      // Interpolate variables in the command
-      const command = interpolate(def.command, ctx);
+      // Interpolate variables in the command with secrets awareness
+      const { value: command, masked: maskedCommand } = interpolateWithSecrets(def.command, ctx, secretInputs);
       
-      // Security check: Log warnings for potentially dangerous patterns
+      // Security check: Log warnings for potentially dangerous patterns (using masked command)
       const safetyWarnings = checkCommandSafety(command);
       for (const warning of safetyWarnings) {
         client.app.log(`[SECURITY WARNING] ${warning}`, "warn");
       }
       
-      // Log command execution to TUI
-      client.app.log(`> ${command}`, "info");
+      // Log command execution to TUI (masked version to hide secrets)
+      client.app.log(`> ${maskedCommand}`, "info");
 
       const options: { cwd?: string; env?: NodeJS.ProcessEnv; timeout?: number } = {};
 
@@ -513,6 +506,70 @@ export function createSuspendStep(def: SuspendStepDefinition) {
 }
 
 // =============================================================================
+// Wait Step Adapter
+// =============================================================================
+
+/**
+ * Output schema for Wait step
+ */
+const WaitOutputSchema = z.object({
+  completed: z.boolean(),
+  durationMs: z.number(),
+  skipped: z.boolean().optional(),
+});
+
+/**
+ * Creates a Mastra step that waits for a specified duration.
+ * Useful for waiting for external systems (e.g., waiting for a deployed URL to become live)
+ * without suspending for human input.
+ * 
+ * This is a platform-independent alternative to `shell: sleep 5`.
+ */
+export function createWaitStep(def: WaitStepDefinition) {
+  return createStep({
+    id: def.id,
+    description: def.description || `Wait ${def.durationMs}ms`,
+    inputSchema: StepInputSchema,
+    outputSchema: WaitOutputSchema,
+    execute: async ({ inputData }) => {
+      const data = inputData as StepInput;
+
+      // IDEMPOTENCY CHECK: Skip if this step was already executed (hydration scenario)
+      // This prevents re-waiting when resuming after restart
+      if (data.steps?.[def.id]) {
+        return data.steps[def.id] as z.infer<typeof WaitOutputSchema>;
+      }
+
+      const ctx = {
+        inputs: data.inputs || {},
+        steps: data.steps || {},
+        env: process.env,
+      };
+
+      // Check condition before execution
+      if (def.condition) {
+        const evaluated = interpolate(def.condition, ctx);
+        if (evaluated === "false" || evaluated === "0" || evaluated === "") {
+          return {
+            completed: false,
+            durationMs: 0,
+            skipped: true,
+          };
+        }
+      }
+
+      // Wait for the specified duration
+      await new Promise(resolve => setTimeout(resolve, def.durationMs));
+
+      return {
+        completed: true,
+        durationMs: def.durationMs,
+      };
+    },
+  });
+}
+
+// =============================================================================
 // HTTP Step Adapter
 // =============================================================================
 
@@ -584,7 +641,9 @@ export function createHttpStep(def: HttpStepDefinition) {
         if (typeof def.body === "string") {
           body = interpolate(def.body, ctx);
         } else {
-          body = JSON.stringify(def.body);
+          // Interpolate object body values before stringifying
+          const interpolatedBody = interpolateObject(def.body as JsonObject, ctx);
+          body = JSON.stringify(interpolatedBody);
         }
       }
 
@@ -713,6 +772,357 @@ export function createFileStep(def: FileStepDefinition) {
         default:
           throw new Error(`Unknown file action: ${(def as FileStepDefinition).action}`);
       }
+    },
+  });
+}
+
+// =============================================================================
+// Iterator Step Adapter
+// =============================================================================
+
+/**
+ * Output schema for Iterator step
+ */
+const IteratorOutputSchema = z.object({
+  results: z.array(z.unknown()),
+  count: z.number(),
+  skipped: z.boolean().optional(),
+});
+
+/**
+ * Execute a single step definition with the given context.
+ * This is a simplified executor for inner steps within an iterator.
+ */
+async function executeInnerStep(
+  def: StepDefinition,
+  ctx: { inputs: Record<string, JsonValue>; steps: Record<string, JsonValue>; env?: NodeJS.ProcessEnv },
+  client: OpencodeClient,
+  secretInputs: string[] = []
+): Promise<JsonValue> {
+  // Check condition before execution (per-item evaluation)
+  if (def.condition) {
+    const evaluated = interpolate(def.condition, ctx);
+    if (evaluated === "false" || evaluated === "0" || evaluated === "") {
+      return {
+        skipped: true,
+      };
+    }
+  }
+
+  switch (def.type) {
+    case "shell": {
+      const { value: command, masked: maskedCommand } = interpolateWithSecrets(def.command, ctx, secretInputs);
+      
+      // Security check: Log warnings for potentially dangerous patterns
+      const safetyWarnings = checkCommandSafety(command);
+      for (const warning of safetyWarnings) {
+        client.app.log(`[SECURITY WARNING] ${warning}`, "warn");
+      }
+      
+      // Log masked command to protect secrets
+      client.app.log(`> ${maskedCommand}`, "info");
+      
+      const options: { cwd?: string; env?: NodeJS.ProcessEnv; timeout?: number } = {};
+      
+      if (def.cwd) {
+        options.cwd = interpolate(def.cwd, ctx);
+      }
+      
+      if (def.env) {
+        options.env = {
+          ...process.env,
+          ...Object.fromEntries(
+            Object.entries(def.env).map(([k, v]) => [k, interpolate(v, ctx)])
+          ),
+        };
+      }
+      
+      if (def.timeout) {
+        options.timeout = def.timeout;
+      }
+      
+      try {
+        const { stdout, stderr } = await execAsync(command, options);
+        return {
+          stdout: stdout.trim(),
+          stderr: stderr.trim(),
+          exitCode: 0,
+        };
+      } catch (error) {
+        const execError = error as { stdout?: string; stderr?: string; code?: number };
+        
+        if (def.failOnError !== false) {
+          throw new Error(
+            `Command failed with exit code ${execError.code}: ${execError.stderr || execError.stdout}`
+          );
+        }
+        
+        return {
+          stdout: execError.stdout?.trim() || "",
+          stderr: execError.stderr?.trim() || "",
+          exitCode: execError.code || 1,
+        };
+      }
+    }
+    
+    case "tool": {
+      const tool = client.tools[def.tool];
+      
+      if (!tool) {
+        const availableTools = Object.keys(client.tools).join(", ") || "(none)";
+        throw new Error(`Tool '${def.tool}' not found. Available tools: ${availableTools}`);
+      }
+      
+      const args = def.args
+        ? interpolateObject(def.args, ctx)
+        : {};
+      
+      client.app.log(`Running tool: ${def.tool}`, "info");
+      const result = await tool.execute(args as JsonObject);
+      
+      return { result };
+    }
+    
+    case "agent": {
+      const prompt = interpolate(def.prompt, ctx);
+      
+      if (def.agent) {
+        if (!client.agents) {
+          throw new Error("No agents available on the opencode client. Ensure agents are configured.");
+        }
+        
+        const agent = client.agents[def.agent];
+        if (!agent) {
+          const availableAgents = Object.keys(client.agents).join(", ") || "(none)";
+          throw new Error(`Agent '${def.agent}' not found. Available agents: ${availableAgents}`);
+        }
+        
+        client.app.log(`Invoking agent: ${def.agent}`, "info");
+        const response = await agent.invoke(prompt, { maxTokens: def.maxTokens });
+        return { response: response.content };
+      }
+      
+      client.app.log(`LLM prompt: ${prompt.slice(0, 50)}${prompt.length > 50 ? '...' : ''}`, "info");
+      
+      const messages: Array<{ role: string; content: string }> = [];
+      
+      if (def.system) {
+        messages.push({
+          role: "system",
+          content: interpolate(def.system, ctx),
+        });
+      }
+      
+      messages.push({ role: "user", content: prompt });
+      
+      const response = await client.llm.chat({
+        messages,
+        maxTokens: def.maxTokens,
+      });
+      
+      return { response: response.content };
+    }
+    
+    case "http": {
+      const rawUrl = interpolate(def.url, ctx);
+      const url = validateUrlForSSRF(rawUrl);
+      
+      const headers = def.headers
+        ? (interpolateObject(def.headers, ctx) as Record<string, string>)
+        : {};
+      
+      let body: string | undefined;
+      if (def.body !== undefined) {
+        if (typeof def.body === "string") {
+          body = interpolate(def.body, ctx);
+        } else {
+          body = JSON.stringify(def.body);
+        }
+      }
+      
+      const controller = new AbortController();
+      const timeoutMs = def.timeout ?? 30000;
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+      
+      try {
+        const response = await fetch(url, {
+          method: def.method,
+          headers,
+          body,
+          signal: controller.signal,
+        });
+        
+        clearTimeout(timeoutId);
+        
+        const text = await response.text();
+        let responseBody: JsonValue = null;
+        try {
+          responseBody = JSON.parse(text) as JsonValue;
+        } catch {
+          // Keep body as null if not valid JSON
+        }
+        
+        if (!response.ok && def.failOnError !== false) {
+          throw new Error(`HTTP ${response.status}: ${text}`);
+        }
+        
+        return {
+          status: response.status,
+          body: responseBody,
+          text,
+          headers: Object.fromEntries(response.headers.entries()),
+        };
+      } catch (error) {
+        clearTimeout(timeoutId);
+        if (error instanceof Error && error.name === "AbortError") {
+          throw new Error(`HTTP request timed out after ${timeoutMs}ms`);
+        }
+        throw error;
+      }
+    }
+    
+    case "file": {
+      const rawPath = interpolate(def.path, ctx);
+      const filePath = validateFilePath(rawPath);
+      
+      switch (def.action) {
+        case "read": {
+          const content = await readFile(filePath, "utf-8");
+          return { content };
+        }
+        
+        case "write": {
+          let writeContent: string;
+          if (def.content === undefined) {
+            throw new Error("Content is required for write action");
+          }
+          if (typeof def.content === "object" && def.content !== null) {
+            writeContent = JSON.stringify(def.content, null, 2);
+          } else {
+            writeContent = interpolate(String(def.content), ctx);
+          }
+          await writeFile(filePath, writeContent, "utf-8");
+          return { success: true };
+        }
+        
+        case "delete": {
+          await unlink(filePath);
+          return { success: true };
+        }
+        
+        default:
+          throw new Error(`Unknown file action: ${(def as FileStepDefinition).action}`);
+      }
+    }
+    
+    case "wait": {
+      // Wait for the specified duration
+      await new Promise(resolve => setTimeout(resolve, def.durationMs));
+      return {
+        completed: true,
+        durationMs: def.durationMs,
+      };
+    }
+    
+    case "suspend":
+      throw new Error("Suspend steps are not supported within iterators");
+    
+    case "iterator":
+      throw new Error("Nested iterators are not supported");
+    
+    default:
+      throw new Error(`Unknown step type: ${(def as StepDefinition).type}`);
+  }
+}
+
+/**
+ * Creates a Mastra step that iterates over an array and executes a sub-step for each item.
+ * 
+ * The iterator provides special context variables for each iteration:
+ * - {{item}} - The current item being processed
+ * - {{index}} - The zero-based index of the current item
+ * - {{item.property}} - Access nested properties of the current item
+ */
+export function createIteratorStep(def: IteratorStepDefinition, client: OpencodeClient) {
+  return createStep({
+    id: def.id,
+    description: def.description || `Iterate over ${def.items}`,
+    inputSchema: StepInputSchema,
+    outputSchema: IteratorOutputSchema,
+    execute: async ({ inputData }) => {
+      const data = inputData as StepInput;
+      const secretInputs = data.secretInputs || [];
+
+      // IDEMPOTENCY CHECK: Skip if this step was already executed (hydration scenario)
+      if (data.steps?.[def.id]) {
+        client.app.log(`Skipping already-completed step: ${def.id}`, "info");
+        return data.steps[def.id] as z.infer<typeof IteratorOutputSchema>;
+      }
+
+      const ctx = {
+        inputs: data.inputs || {},
+        steps: data.steps || {},
+        env: process.env,
+      };
+
+      // Check condition before execution
+      if (def.condition) {
+        const evaluated = interpolate(def.condition, ctx);
+        if (evaluated === "false" || evaluated === "0" || evaluated === "") {
+          return {
+            results: [],
+            count: 0,
+            skipped: true,
+          };
+        }
+      }
+
+      // Resolve the items array using interpolateValue to preserve the array type
+      const itemsValue = interpolateValue(def.items, ctx);
+      
+      if (!Array.isArray(itemsValue)) {
+        throw new Error(
+          `Iterator items must resolve to an array. Got ${typeof itemsValue}: ${JSON.stringify(itemsValue)}`
+        );
+      }
+
+      const items = itemsValue as JsonValue[];
+      client.app.log(`Iterating over ${items.length} items`, "info");
+
+      const results: JsonValue[] = [];
+
+      for (let index = 0; index < items.length; index++) {
+        const item = items[index];
+        
+        // Create context with item and index available for interpolation
+        // We inject these as special inputs that can be accessed via {{item}} and {{index}}
+        const iterationCtx = {
+          inputs: {
+            ...ctx.inputs,
+            item,
+            index,
+          } as Record<string, JsonValue>,
+          steps: ctx.steps,
+          env: ctx.env,
+        };
+
+        // Create a copy of the runStep definition with a generated id if not provided
+        const stepDef: StepDefinition = {
+          ...def.runStep,
+          id: def.runStep.id || `${def.id}-iteration-${index}`,
+        } as StepDefinition;
+
+        client.app.log(`[${index + 1}/${items.length}] Processing item`, "info");
+
+        // Execute the inner step with secretInputs for masking
+        const result = await executeInnerStep(stepDef, iterationCtx, client, secretInputs);
+        results.push(result);
+      }
+
+      return {
+        results,
+        count: items.length,
+      };
     },
   });
 }

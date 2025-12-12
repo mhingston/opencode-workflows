@@ -40,3 +40,5 @@ jobs:
         run: |
           test -f dist/index.js || (echo "Build output missing: dist/index.js" && exit 1)
           test -f dist/index.d.ts || (echo "Build output missing: dist/index.d.ts" && exit 1)
+          test -f dist/utils.js || (echo "Build output missing: dist/utils.js" && exit 1)
+          test -f dist/utils.d.ts || (echo "Build output missing: dist/utils.d.ts" && exit 1)

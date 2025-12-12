@@ -1,7 +1,8 @@
 import { LibSQLStore } from "@mastra/libsql";
 import { mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import type { WorkflowRun, Logger, WorkflowInputs, StepResult, JsonValue } from "../types.js";
+import type { WorkflowRun, Logger } from "../types.js";
+import { encryptSecretInputs, decryptSecretInputs } from "../adapters/secrets.js";
 
 /**
  * Storage configuration options
@@ -11,6 +12,12 @@ export interface StorageConfig {
   dbPath: string;
   /** Enable verbose logging */
   verbose?: boolean;
+  /** 
+   * Encryption key for encrypting sensitive inputs in the database.
+   * If not provided, sensitive inputs will be stored in plain text.
+   * It's strongly recommended to set this in production environments.
+   */
+  encryptionKey?: string;
 }
 
 /**
@@ -64,6 +71,7 @@ interface LibSQLExecuteResult {
  */
 interface LibSQLClient {
   execute: (sql: { sql: string; args: (string | number | null)[] }) => Promise<LibSQLExecuteResult>;
+  close?: () => void;
 }
 
 /**
@@ -85,6 +93,16 @@ class ExtendedLibSQLStore extends LibSQLStore {
     }
     return client.execute({ sql, args });
   }
+
+  /**
+   * Close the underlying LibSQL client connection.
+   */
+  closeClient(): void {
+    const client = (this as unknown as { client?: LibSQLClient }).client;
+    if (client?.close) {
+      client.close();
+    }
+  }
 }
 
 /**
@@ -94,11 +112,28 @@ export class WorkflowStorage {
   private store: ExtendedLibSQLStore | null = null;
   private initialized = false;
   private initPromise: Promise<void> | null = null;
+  /** Map of workflow IDs to their secret input keys */
+  private workflowSecrets = new Map<string, string[]>();
 
   constructor(
     private config: StorageConfig,
     private log: Logger
   ) {}
+
+  /**
+   * Register secret input keys for a workflow.
+   * These inputs will be encrypted when stored.
+   */
+  setWorkflowSecrets(workflowId: string, secretKeys: string[]): void {
+    this.workflowSecrets.set(workflowId, secretKeys);
+  }
+
+  /**
+   * Get secret input keys for a workflow
+   */
+  getWorkflowSecrets(workflowId: string): string[] {
+    return this.workflowSecrets.get(workflowId) || [];
+  }
 
   /**
    * Initialize the storage (lazy initialization)
@@ -195,11 +230,23 @@ export class WorkflowStorage {
     await this.init();
     if (!this.store) throw new Error("Storage not initialized");
 
+    // Encrypt secret inputs if encryption key is provided
+    let inputsToStore = run.inputs;
+    const secretKeys = this.workflowSecrets.get(run.workflowId) || [];
+    
+    if (this.config.encryptionKey && secretKeys.length > 0) {
+      inputsToStore = encryptSecretInputs(
+        run.inputs as Record<string, unknown>,
+        secretKeys,
+        this.config.encryptionKey
+      ) as typeof run.inputs;
+    }
+
     const serialized: SerializedRun = {
       runId: run.runId,
       workflowId: run.workflowId,
       status: run.status,
-      inputs: JSON.stringify(run.inputs),
+      inputs: JSON.stringify(inputsToStore),
       stepResults: JSON.stringify(run.stepResults),
       currentStepId: run.currentStepId,
       suspendedData: run.suspendedData ? JSON.stringify(run.suspendedData) : undefined,
@@ -242,11 +289,23 @@ export class WorkflowStorage {
     await this.init();
     if (!this.store) throw new Error("Storage not initialized");
 
+    // Encrypt secret inputs if encryption key is provided
+    let inputsToStore = run.inputs;
+    const secretKeys = this.workflowSecrets.get(run.workflowId) || [];
+    
+    if (this.config.encryptionKey && secretKeys.length > 0) {
+      inputsToStore = encryptSecretInputs(
+        run.inputs as Record<string, unknown>,
+        secretKeys,
+        this.config.encryptionKey
+      ) as typeof run.inputs;
+    }
+
     const serialized: SerializedRun = {
       runId: run.runId,
       workflowId: run.workflowId,
       status: run.status,
-      inputs: JSON.stringify(run.inputs),
+      inputs: JSON.stringify(inputsToStore),
       stepResults: JSON.stringify(run.stepResults),
       currentStepId: run.currentStepId,
       suspendedData: run.suspendedData ? JSON.stringify(run.suspendedData) : undefined,
@@ -379,11 +438,18 @@ export class WorkflowStorage {
    * Deserialize a run from storage format
    */
   private deserializeRun(serialized: SerializedRun): WorkflowRun {
+    let inputs = JSON.parse(serialized.inputs || "{}");
+    
+    // Decrypt secret inputs if encryption key is provided
+    if (this.config.encryptionKey) {
+      inputs = decryptSecretInputs(inputs, this.config.encryptionKey);
+    }
+    
     return {
       runId: serialized.runId,
       workflowId: serialized.workflowId,
       status: serialized.status as WorkflowRun["status"],
-      inputs: JSON.parse(serialized.inputs || "{}"),
+      inputs,
       stepResults: JSON.parse(serialized.stepResults || "{}"),
       currentStepId: serialized.currentStepId,
       suspendedData: serialized.suspendedData ? JSON.parse(serialized.suspendedData) : undefined,
@@ -399,11 +465,8 @@ export class WorkflowStorage {
   async close(): Promise<void> {
     if (this.store) {
       try {
-        // Execute a no-op query to ensure pending operations complete
-        // then close by releasing the reference
-        // Note: LibSQLStore doesn't expose a close method, but the underlying
-        // libsql client will be garbage collected when dereferenced
-        await this.store.executeSQL("SELECT 1");
+        // Properly close the underlying LibSQL client connection
+        this.store.closeClient();
       } catch {
         // Ignore errors during close
       }
