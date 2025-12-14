@@ -661,6 +661,7 @@ The script has access to:
 - `inputs` - Workflow input parameters
 - `steps` - Previous step outputs
 - `env` - Environment variables (read-only)
+- `console` - `log`, `warn`, `error` methods (output routed to plugin logger)
 - Safe built-ins: `JSON`, `Math`, `Date`, `Array`, `Object`, `String`, `Number`, `Boolean`, `RegExp`, `Map`, `Set`, `Promise`
 
 | Option | Type | Default | Description |

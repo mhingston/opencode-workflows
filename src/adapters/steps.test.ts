@@ -649,6 +649,45 @@ describe("Step Adapters", () => {
         ).rejects.toThrow("Safe mode requires 'args'");
       });
     });
+
+    describe("timeout handling", () => {
+      it("should kill process tree when command times out", async () => {
+        // Import the mocked tree-kill to verify it was called
+        const treeKill = await import("tree-kill");
+        const mockTreeKill = vi.mocked(treeKill.default);
+        mockTreeKill.mockClear();
+
+        // Create a process that will be killed
+        const process = createMockProcess();
+        currentMockProcess = process;
+        mockSpawn.mockReturnValue(process);
+
+        const step = createShellStep(
+          { id: "slow-cmd", type: "shell", command: "sleep 60", timeout: 50 },
+          mockClient
+        );
+
+        // Start execution and expect it to reject due to timeout
+        const executePromise = step.execute({
+          inputData: { inputs: {}, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        // After a short delay, emit close to simulate the process being killed
+        setTimeout(() => {
+          process.emit("close", 1);
+        }, 100);
+
+        // The promise should reject due to timeout
+        await expect(executePromise).rejects.toThrow("timed out");
+
+        // Verify tree-kill was called with the process PID
+        expect(mockTreeKill).toHaveBeenCalledWith(
+          process.pid,
+          "SIGTERM",
+          expect.any(Function)
+        );
+      });
+    });
   });
 
   // =============================================================================

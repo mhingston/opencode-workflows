@@ -1226,7 +1226,12 @@ export async function executeInnerStep(
       const timeout = def.scriptTimeout ?? DEFAULT_SCRIPT_TIMEOUT;
       client.app.log(`Executing eval script (timeout: ${timeout}ms)`, "info");
       
-      const scriptResult = await executeScript(def.script, ctx, timeout);
+      const scriptResult = await executeScript(
+        def.script, 
+        ctx, 
+        timeout,
+        (msg, level) => client.app.log(`[eval] ${msg}`, level)
+      );
       
       if (scriptResult.workflow) {
         // Dynamic workflow generation is not supported within iterators or cleanup blocks
@@ -1408,10 +1413,15 @@ const DEFAULT_SCRIPT_TIMEOUT = 30000;
 function createSandboxContext(
   inputs: Record<string, JsonValue>,
   steps: Record<string, JsonValue>,
-  env: NodeJS.ProcessEnv
+  env: NodeJS.ProcessEnv,
+  logger?: (message: string, level: "info" | "warn" | "error") => void
 ): Context {
   // Create a frozen copy of env to prevent modification
   const frozenEnv = Object.freeze({ ...env });
+  
+  // Helper to format console arguments
+  const formatArgs = (...args: unknown[]): string => 
+    args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
   
   return {
     // Workflow context (read-only via frozen copies)
@@ -1419,11 +1429,11 @@ function createSandboxContext(
     steps: Object.freeze(JSON.parse(JSON.stringify(steps))),
     env: frozenEnv,
     
-    // Safe built-ins
+    // Console mapped to plugin logger (or silent if no logger provided)
     console: {
-      log: () => {}, // Silent by default, could be captured
-      warn: () => {},
-      error: () => {},
+      log: (...args: unknown[]) => logger?.(formatArgs(...args), "info"),
+      warn: (...args: unknown[]) => logger?.(formatArgs(...args), "warn"),
+      error: (...args: unknown[]) => logger?.(formatArgs(...args), "error"),
     },
     JSON,
     Math,
@@ -1470,9 +1480,10 @@ function createSandboxContext(
 async function executeScript(
   script: string,
   ctx: { inputs: Record<string, JsonValue>; steps: Record<string, JsonValue>; env?: NodeJS.ProcessEnv },
-  timeout: number
+  timeout: number,
+  logger?: (message: string, level: "info" | "warn" | "error") => void
 ): Promise<{ result?: JsonValue; workflow?: WorkflowDefinition }> {
-  const sandbox = createSandboxContext(ctx.inputs, ctx.steps, ctx.env || {});
+  const sandbox = createSandboxContext(ctx.inputs, ctx.steps, ctx.env || {}, logger);
   
   // Wrap the script in an async IIFE to support await and return statements
   const wrappedScript = `
@@ -1557,7 +1568,12 @@ export function createEvalStep(def: EvalStepDefinition, client: OpencodeClient) 
       const timeout = def.scriptTimeout ?? DEFAULT_SCRIPT_TIMEOUT;
       client.app.log(`Executing eval script in sandbox (timeout: ${timeout}ms)`, "info");
 
-      const scriptResult = await executeScript(def.script, ctx, timeout);
+      const scriptResult = await executeScript(
+        def.script, 
+        ctx, 
+        timeout,
+        (msg, level) => client.app.log(`[eval] ${msg}`, level)
+      );
 
       if (scriptResult.workflow) {
         client.app.log(`Eval step generated dynamic workflow: ${scriptResult.workflow.id}`, "info");
