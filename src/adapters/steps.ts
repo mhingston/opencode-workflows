@@ -284,47 +284,47 @@ function validateUrlForSSRF(urlString: string): string {
  * Input schema for step execution context.
  * Includes optional secretInputs array for masking sensitive values in logs.
  * Supports complex input types (object, array) in addition to primitives.
+ * 
+ * IMPORTANT: This schema is used for BOTH input and output of steps.
+ * When Mastra chains steps with .then(), the output of step N becomes the
+ * inputData for step N+1. By using the same schema and accumulating step
+ * outputs in the `steps` field, we maintain context through the entire chain.
  */
-const StepInputSchema = z.object({
+const StepContextSchema = z.object({
   inputs: z.record(JsonValueSchema),
   steps: z.record(JsonValueSchema),
   secretInputs: z.array(z.string()).optional(),
 });
 
-type StepInput = z.infer<typeof StepInputSchema>;
+type StepContext = z.infer<typeof StepContextSchema>;
 
 // =============================================================================
 // Shell Step Adapter
 // =============================================================================
 
 /**
- * Output schema with optional skipped status
- */
-const ShellOutputSchema = z.object({
-  stdout: z.string(),
-  stderr: z.string(),
-  exitCode: z.number(),
-  skipped: z.boolean().optional(),
-});
-
-/**
- * Creates a Mastra step that executes a shell command
+ * Creates a Mastra step that executes a shell command.
+ * 
+ * IMPORTANT: Returns the full accumulated context (inputs, steps, secretInputs)
+ * so that subsequent steps in the chain can access previous step outputs via
+ * {{steps.stepId.property}} interpolation.
  */
 export function createShellStep(def: ShellStepDefinition, client: OpencodeClient) {
   return createStep({
     id: def.id,
     description: def.description || `Execute: ${def.command}`,
-    inputSchema: StepInputSchema,
-    outputSchema: ShellOutputSchema,
+    inputSchema: StepContextSchema,
+    outputSchema: StepContextSchema,
     execute: async ({ inputData }) => {
-      const data = inputData as StepInput;
+      const data = inputData as StepContext;
       const secretInputs = data.secretInputs || [];
 
       // IDEMPOTENCY CHECK: Skip if this step was already executed (hydration scenario)
       // This prevents re-execution of side-effects (e.g., deployments) when resuming after restart
       if (data.steps?.[def.id]) {
         client.app.log(`Skipping already-completed step: ${def.id}`, "info");
-        return data.steps[def.id] as z.infer<typeof ShellOutputSchema>;
+        // Return the context as-is since step already exists
+        return data;
       }
 
       const ctx = {
@@ -338,11 +338,17 @@ export function createShellStep(def: ShellStepDefinition, client: OpencodeClient
         const evaluated = interpolate(def.condition, ctx);
         // Skip if condition evaluates to falsy value
         if (evaluated === "false" || evaluated === "0" || evaluated === "") {
-          return {
+          const skipResult = {
             stdout: "",
             stderr: "Skipped due to condition",
             exitCode: 0,
             skipped: true,
+          };
+          // Return accumulated context with skip result
+          return {
+            inputs: data.inputs || {},
+            steps: { ...ctx.steps, [def.id]: skipResult },
+            secretInputs,
           };
         }
       }
@@ -404,10 +410,17 @@ export function createShellStep(def: ShellStepDefinition, client: OpencodeClient
           );
         }
         
-        return {
+        const stepResult = {
           stdout: result.stdout.trim(),
           stderr: result.stderr.trim(),
           exitCode: result.exitCode,
+        };
+        
+        // Return accumulated context with this step's result added
+        return {
+          inputs: data.inputs || {},
+          steps: { ...ctx.steps, [def.id]: stepResult },
+          secretInputs,
         };
       } catch (error) {
         // Re-throw if this is our own error from exit code check above
@@ -424,10 +437,17 @@ export function createShellStep(def: ShellStepDefinition, client: OpencodeClient
           );
         }
 
-        return {
+        const stepResult = {
           stdout: execError.stdout?.trim() || "",
           stderr: execError.stderr?.trim() || "",
           exitCode: execError.code ?? execError.exitCode ?? 1,
+        };
+        
+        // Return accumulated context with this step's result added
+        return {
+          inputs: data.inputs || {},
+          steps: { ...ctx.steps, [def.id]: stepResult },
+          secretInputs,
         };
       }
     },
@@ -439,25 +459,26 @@ export function createShellStep(def: ShellStepDefinition, client: OpencodeClient
 // =============================================================================
 
 /**
- * Creates a Mastra step that invokes an Opencode tool
+ * Creates a Mastra step that invokes an Opencode tool.
+ * 
+ * IMPORTANT: Returns the full accumulated context so subsequent steps can
+ * access this step's output via {{steps.stepId.result}} interpolation.
  */
 export function createToolStep(def: ToolStepDefinition, client: OpencodeClient) {
   return createStep({
     id: def.id,
     description: def.description || `Execute tool: ${def.tool}`,
-    inputSchema: StepInputSchema,
-    outputSchema: z.object({
-      result: JsonValueSchema,
-      skipped: z.boolean().optional(),
-    }),
+    inputSchema: StepContextSchema,
+    outputSchema: StepContextSchema,
     execute: async ({ inputData }) => {
-      const data = inputData as StepInput;
+      const data = inputData as StepContext;
+      const secretInputs = data.secretInputs || [];
 
       // IDEMPOTENCY CHECK: Skip if this step was already executed (hydration scenario)
       // This prevents re-execution of side-effects when resuming after restart
       if (data.steps?.[def.id]) {
         client.app.log(`Skipping already-completed step: ${def.id}`, "info");
-        return data.steps[def.id] as { result: JsonValue; skipped?: boolean };
+        return data;
       }
 
       const ctx = {
@@ -470,9 +491,11 @@ export function createToolStep(def: ToolStepDefinition, client: OpencodeClient) 
       if (def.condition) {
         const evaluated = interpolate(def.condition, ctx);
         if (evaluated === "false" || evaluated === "0" || evaluated === "") {
+          const skipResult = { result: null, skipped: true };
           return {
-            result: null,
-            skipped: true,
+            inputs: data.inputs || {},
+            steps: { ...ctx.steps, [def.id]: skipResult },
+            secretInputs,
           };
         }
       }
@@ -492,7 +515,12 @@ export function createToolStep(def: ToolStepDefinition, client: OpencodeClient) 
       client.app.log(`Running tool: ${def.tool}`, "info");
       const result = await tool.execute(args as JsonObject);
 
-      return { result };
+      const stepResult = { result };
+      return {
+        inputs: data.inputs || {},
+        steps: { ...ctx.steps, [def.id]: stepResult },
+        secretInputs,
+      };
     },
   });
 }
@@ -507,24 +535,25 @@ export function createToolStep(def: ToolStepDefinition, client: OpencodeClient) 
  * Supports two modes:
  * 1. Named agent reference: Uses `def.agent` to invoke a pre-defined opencode agent
  * 2. Inline LLM call: Uses `def.system` for direct LLM chat (legacy/fallback)
+ * 
+ * IMPORTANT: Returns the full accumulated context so subsequent steps can
+ * access this step's output via {{steps.stepId.response}} interpolation.
  */
 export function createAgentStep(def: AgentStepDefinition, client: OpencodeClient) {
   return createStep({
     id: def.id,
     description: def.description || (def.agent ? `Agent: ${def.agent}` : "LLM prompt"),
-    inputSchema: StepInputSchema,
-    outputSchema: z.object({
-      response: z.string(),
-      skipped: z.boolean().optional(),
-    }),
+    inputSchema: StepContextSchema,
+    outputSchema: StepContextSchema,
     execute: async ({ inputData }) => {
-      const data = inputData as StepInput;
+      const data = inputData as StepContext;
+      const secretInputs = data.secretInputs || [];
 
       // IDEMPOTENCY CHECK: Skip if this step was already executed (hydration scenario)
       // This prevents re-execution of side-effects when resuming after restart
       if (data.steps?.[def.id]) {
         client.app.log(`Skipping already-completed step: ${def.id}`, "info");
-        return data.steps[def.id] as { response: string; skipped?: boolean };
+        return data;
       }
 
       const ctx = {
@@ -537,9 +566,11 @@ export function createAgentStep(def: AgentStepDefinition, client: OpencodeClient
       if (def.condition) {
         const evaluated = interpolate(def.condition, ctx);
         if (evaluated === "false" || evaluated === "0" || evaluated === "") {
+          const skipResult = { response: "", skipped: true };
           return {
-            response: "",
-            skipped: true,
+            inputs: data.inputs || {},
+            steps: { ...ctx.steps, [def.id]: skipResult },
+            secretInputs,
           };
         }
       }
@@ -561,7 +592,12 @@ export function createAgentStep(def: AgentStepDefinition, client: OpencodeClient
 
         client.app.log(`Invoking agent: ${def.agent}`, "info");
         const response = await agent.invoke(prompt, { maxTokens: def.maxTokens });
-        return { response: response.content };
+        const stepResult = { response: response.content };
+        return {
+          inputs: data.inputs || {},
+          steps: { ...ctx.steps, [def.id]: stepResult },
+          secretInputs,
+        };
       }
 
       // Mode 2: Inline LLM call (legacy/fallback)
@@ -583,7 +619,12 @@ export function createAgentStep(def: AgentStepDefinition, client: OpencodeClient
         maxTokens: def.maxTokens,
       });
 
-      return { response: response.content };
+      const stepResult = { response: response.content };
+      return {
+        inputs: data.inputs || {},
+        steps: { ...ctx.steps, [def.id]: stepResult },
+        secretInputs,
+      };
     },
   });
 }
@@ -593,50 +634,55 @@ export function createAgentStep(def: AgentStepDefinition, client: OpencodeClient
 // =============================================================================
 
 /**
- * Creates a Mastra step that suspends execution for human approval
+ * Creates a Mastra step that suspends execution for human approval.
+ * 
+ * NOTE: Suspend steps are special - they don't follow the normal context accumulation
+ * pattern because Mastra handles suspension/resumption internally.
+ * 
+ * IMPORTANT: Returns the full accumulated context so subsequent steps can
+ * access this step's output via {{steps.stepId.resumed}} interpolation.
  */
 export function createSuspendStep(def: SuspendStepDefinition) {
   return createStep({
     id: def.id,
     description: def.description || "Awaiting human input",
-    inputSchema: StepInputSchema,
-    outputSchema: z.object({
-      resumed: z.boolean(),
-      data: JsonValueSchema.optional(),
-      skipped: z.boolean().optional(),
-    }),
+    inputSchema: StepContextSchema,
+    outputSchema: StepContextSchema,
     execute: async ({ inputData, suspend, resumeData }) => {
+      const data = inputData as StepContext;
+      const secretInputs = data.secretInputs || [];
+
       // If we have resumeData, we're resuming from a suspended state
       if (resumeData !== undefined) {
         // Validate resume data against schema if provided
         if (def.resumeSchema) {
           const schemaKeys = Object.keys(def.resumeSchema);
-          const data = resumeData as JsonObject;
+          const resumeObj = resumeData as JsonObject;
           
-          if (typeof data !== 'object' || data === null) {
+          if (typeof resumeObj !== 'object' || resumeObj === null) {
             throw new Error("Resume data must be an object");
           }
 
-          const missing = schemaKeys.filter(k => !(k in data));
+          const missing = schemaKeys.filter(k => !(k in resumeObj));
           if (missing.length > 0) {
             throw new Error(`Missing required resume data: ${missing.join(", ")}`);
           }
         }
 
+        const stepResult = { resumed: true, data: resumeData };
         return {
-          resumed: true,
-          data: resumeData,
+          inputs: data.inputs || {},
+          steps: { ...(data.steps || {}), [def.id]: stepResult },
+          secretInputs,
         };
       }
-
-      const data = inputData as StepInput;
 
       // IDEMPOTENCY CHECK: Skip if this step was already completed (hydration scenario)
       // This prevents re-suspending on steps that were already resumed in a previous run.
       // Without this, workflows with multiple suspend steps would get stuck on the first one
       // when rehydrating after a server restart.
       if (data.steps?.[def.id]) {
-        return data.steps[def.id] as { resumed: boolean; data?: JsonValue; skipped?: boolean };
+        return data;
       }
 
       const ctx = {
@@ -649,10 +695,11 @@ export function createSuspendStep(def: SuspendStepDefinition) {
       if (def.condition) {
         const evaluated = interpolate(def.condition, ctx);
         if (evaluated === "false" || evaluated === "0" || evaluated === "") {
+          const skipResult = { resumed: false, data: undefined, skipped: true };
           return {
-            resumed: false,
-            data: undefined,
-            skipped: true,
+            inputs: data.inputs || {},
+            steps: { ...ctx.steps, [def.id]: skipResult },
+            secretInputs,
           };
         }
       }
@@ -664,10 +711,12 @@ export function createSuspendStep(def: SuspendStepDefinition) {
       // Suspend and wait for resume
       await suspend({ message });
 
-      // This won't be reached until resumed
+      // This won't be reached until resumed - return context with pending result
+      const stepResult = { resumed: true, data: undefined };
       return {
-        resumed: true,
-        data: undefined,
+        inputs: data.inputs || {},
+        steps: { ...ctx.steps, [def.id]: stepResult },
+        secretInputs,
       };
     },
   });
@@ -678,34 +727,29 @@ export function createSuspendStep(def: SuspendStepDefinition) {
 // =============================================================================
 
 /**
- * Output schema for Wait step
- */
-const WaitOutputSchema = z.object({
-  completed: z.boolean(),
-  durationMs: z.number(),
-  skipped: z.boolean().optional(),
-});
-
-/**
  * Creates a Mastra step that waits for a specified duration.
  * Useful for waiting for external systems (e.g., waiting for a deployed URL to become live)
  * without suspending for human input.
  * 
  * This is a platform-independent alternative to `shell: sleep 5`.
+ * 
+ * IMPORTANT: Returns the full accumulated context so subsequent steps can
+ * access this step's output via {{steps.stepId.completed}} interpolation.
  */
 export function createWaitStep(def: WaitStepDefinition) {
   return createStep({
     id: def.id,
     description: def.description || `Wait ${def.durationMs}ms`,
-    inputSchema: StepInputSchema,
-    outputSchema: WaitOutputSchema,
+    inputSchema: StepContextSchema,
+    outputSchema: StepContextSchema,
     execute: async ({ inputData }) => {
-      const data = inputData as StepInput;
+      const data = inputData as StepContext;
+      const secretInputs = data.secretInputs || [];
 
       // IDEMPOTENCY CHECK: Skip if this step was already executed (hydration scenario)
       // This prevents re-waiting when resuming after restart
       if (data.steps?.[def.id]) {
-        return data.steps[def.id] as z.infer<typeof WaitOutputSchema>;
+        return data;
       }
 
       const ctx = {
@@ -718,10 +762,11 @@ export function createWaitStep(def: WaitStepDefinition) {
       if (def.condition) {
         const evaluated = interpolate(def.condition, ctx);
         if (evaluated === "false" || evaluated === "0" || evaluated === "") {
+          const skipResult = { completed: false, durationMs: 0, skipped: true };
           return {
-            completed: false,
-            durationMs: 0,
-            skipped: true,
+            inputs: data.inputs || {},
+            steps: { ...ctx.steps, [def.id]: skipResult },
+            secretInputs,
           };
         }
       }
@@ -729,9 +774,11 @@ export function createWaitStep(def: WaitStepDefinition) {
       // Wait for the specified duration
       await new Promise(resolve => setTimeout(resolve, def.durationMs));
 
+      const stepResult = { completed: true, durationMs: def.durationMs };
       return {
-        completed: true,
-        durationMs: def.durationMs,
+        inputs: data.inputs || {},
+        steps: { ...ctx.steps, [def.id]: stepResult },
+        secretInputs,
       };
     },
   });
@@ -742,35 +789,25 @@ export function createWaitStep(def: WaitStepDefinition) {
 // =============================================================================
 
 /**
- * Output schema for HTTP step
- * Includes both parsed body and raw text for flexibility
- */
-const HttpOutputSchema = z.object({
-  status: z.number(),
-  /** Parsed JSON body, or null if response is not valid JSON */
-  body: z.unknown(),
-  /** Raw response text (useful when JSON parsing fails or for non-JSON responses) */
-  text: z.string(),
-  headers: z.record(z.string()),
-  skipped: z.boolean().optional(),
-});
-
-/**
- * Creates a Mastra step that executes an HTTP request
+ * Creates a Mastra step that executes an HTTP request.
+ * 
+ * IMPORTANT: Returns the full accumulated context so subsequent steps can
+ * access this step's output via {{steps.stepId.body}} interpolation.
  */
 export function createHttpStep(def: HttpStepDefinition) {
   return createStep({
     id: def.id,
     description: def.description || `${def.method} ${def.url}`,
-    inputSchema: StepInputSchema,
-    outputSchema: HttpOutputSchema,
+    inputSchema: StepContextSchema,
+    outputSchema: StepContextSchema,
     execute: async ({ inputData }) => {
-      const data = inputData as StepInput;
+      const data = inputData as StepContext;
+      const secretInputs = data.secretInputs || [];
 
       // IDEMPOTENCY CHECK: Skip if this step was already executed (hydration scenario)
       // This prevents re-execution of side-effects (e.g., API calls) when resuming after restart
       if (data.steps?.[def.id]) {
-        return data.steps[def.id] as z.infer<typeof HttpOutputSchema>;
+        return data;
       }
 
       const ctx = {
@@ -783,12 +820,11 @@ export function createHttpStep(def: HttpStepDefinition) {
       if (def.condition) {
         const evaluated = interpolate(def.condition, ctx);
         if (evaluated === "false" || evaluated === "0" || evaluated === "") {
+          const skipResult = { status: 0, body: null, text: "", headers: {}, skipped: true };
           return {
-            status: 0,
-            body: null,
-            text: "",
-            headers: {},
-            skipped: true,
+            inputs: data.inputs || {},
+            steps: { ...ctx.steps, [def.id]: skipResult },
+            secretInputs,
           };
         }
       }
@@ -843,11 +879,16 @@ export function createHttpStep(def: HttpStepDefinition) {
           throw new Error(`HTTP ${response.status}: ${text}`);
         }
 
-        return {
+        const stepResult = {
           status: response.status,
-          body: responseBody,
+          body: responseBody as JsonValue,
           text,
           headers: Object.fromEntries(response.headers.entries()),
+        };
+        return {
+          inputs: data.inputs || {},
+          steps: { ...ctx.steps, [def.id]: stepResult as JsonValue },
+          secretInputs,
         };
       } catch (error) {
         clearTimeout(timeoutId);
@@ -865,30 +906,25 @@ export function createHttpStep(def: HttpStepDefinition) {
 // =============================================================================
 
 /**
- * Output schema for File step
- */
-const FileOutputSchema = z.object({
-  content: z.string().optional(),
-  success: z.boolean().optional(),
-  skipped: z.boolean().optional(),
-});
-
-/**
- * Creates a Mastra step that performs file operations
+ * Creates a Mastra step that performs file operations.
+ * 
+ * IMPORTANT: Returns the full accumulated context so subsequent steps can
+ * access this step's output via {{steps.stepId.content}} interpolation.
  */
 export function createFileStep(def: FileStepDefinition) {
   return createStep({
     id: def.id,
     description: def.description || `File ${def.action}: ${def.path}`,
-    inputSchema: StepInputSchema,
-    outputSchema: FileOutputSchema,
+    inputSchema: StepContextSchema,
+    outputSchema: StepContextSchema,
     execute: async ({ inputData }) => {
-      const data = inputData as StepInput;
+      const data = inputData as StepContext;
+      const secretInputs = data.secretInputs || [];
 
       // IDEMPOTENCY CHECK: Skip if this step was already executed (hydration scenario)
       // This prevents re-execution of side-effects (e.g., file writes) when resuming after restart
       if (data.steps?.[def.id]) {
-        return data.steps[def.id] as z.infer<typeof FileOutputSchema>;
+        return data;
       }
 
       const ctx = {
@@ -901,8 +937,11 @@ export function createFileStep(def: FileStepDefinition) {
       if (def.condition) {
         const evaluated = interpolate(def.condition, ctx);
         if (evaluated === "false" || evaluated === "0" || evaluated === "") {
+          const skipResult = { skipped: true };
           return {
-            skipped: true,
+            inputs: data.inputs || {},
+            steps: { ...ctx.steps, [def.id]: skipResult },
+            secretInputs,
           };
         }
       }
@@ -911,10 +950,12 @@ export function createFileStep(def: FileStepDefinition) {
       const rawPath = interpolate(def.path, ctx);
       const filePath = validateFilePath(rawPath);
 
+      let stepResult: JsonValue;
       switch (def.action) {
         case "read": {
           const content = await readFile(filePath, "utf-8");
-          return { content };
+          stepResult = { content };
+          break;
         }
 
         case "write": {
@@ -929,17 +970,25 @@ export function createFileStep(def: FileStepDefinition) {
             writeContent = interpolate(String(def.content), ctx);
           }
           await writeFile(filePath, writeContent, "utf-8");
-          return { success: true };
+          stepResult = { success: true };
+          break;
         }
 
         case "delete": {
           await unlink(filePath);
-          return { success: true };
+          stepResult = { success: true };
+          break;
         }
 
         default:
           throw new Error(`Unknown file action: ${(def as FileStepDefinition).action}`);
       }
+
+      return {
+        inputs: data.inputs || {},
+        steps: { ...ctx.steps, [def.id]: stepResult },
+        secretInputs,
+      };
     },
   });
 }
@@ -947,15 +996,6 @@ export function createFileStep(def: FileStepDefinition) {
 // =============================================================================
 // Iterator Step Adapter
 // =============================================================================
-
-/**
- * Output schema for Iterator step
- */
-const IteratorOutputSchema = z.object({
-  results: z.array(z.unknown()),
-  count: z.number(),
-  skipped: z.boolean().optional(),
-});
 
 /**
  * Execute a single step definition with the given context.
@@ -1266,6 +1306,9 @@ export async function executeInnerStep(
  * 
  * When using runSteps (sequence mode), each step can access outputs from previous
  * steps in the sequence via {{steps.stepId.property}}.
+ * 
+ * IMPORTANT: Returns the full accumulated context so subsequent steps can
+ * access this step's output via {{steps.stepId.results}} interpolation.
  */
 export function createIteratorStep(def: IteratorStepDefinition, client: OpencodeClient) {
   // Validate that exactly one of runStep or runSteps is provided
@@ -1282,16 +1325,16 @@ export function createIteratorStep(def: IteratorStepDefinition, client: Opencode
   return createStep({
     id: def.id,
     description: def.description || `Iterate over ${def.items}`,
-    inputSchema: StepInputSchema,
-    outputSchema: IteratorOutputSchema,
+    inputSchema: StepContextSchema,
+    outputSchema: StepContextSchema,
     execute: async ({ inputData }) => {
-      const data = inputData as StepInput;
+      const data = inputData as StepContext;
       const secretInputs = data.secretInputs || [];
 
       // IDEMPOTENCY CHECK: Skip if this step was already executed (hydration scenario)
       if (data.steps?.[def.id]) {
         client.app.log(`Skipping already-completed step: ${def.id}`, "info");
-        return data.steps[def.id] as z.infer<typeof IteratorOutputSchema>;
+        return data;
       }
 
       const ctx = {
@@ -1304,10 +1347,11 @@ export function createIteratorStep(def: IteratorStepDefinition, client: Opencode
       if (def.condition) {
         const evaluated = interpolate(def.condition, ctx);
         if (evaluated === "false" || evaluated === "0" || evaluated === "") {
+          const skipResult = { results: [], count: 0, skipped: true };
           return {
-            results: [],
-            count: 0,
-            skipped: true,
+            inputs: data.inputs || {},
+            steps: { ...ctx.steps, [def.id]: skipResult },
+            secretInputs,
           };
         }
       }
@@ -1381,9 +1425,11 @@ export function createIteratorStep(def: IteratorStepDefinition, client: Opencode
         }
       }
 
+      const stepResult = { results, count: items.length };
       return {
-        results,
-        count: items.length,
+        inputs: data.inputs || {},
+        steps: { ...ctx.steps, [def.id]: stepResult },
+        secretInputs,
       };
     },
   });
@@ -1392,16 +1438,6 @@ export function createIteratorStep(def: IteratorStepDefinition, client: Opencode
 // =============================================================================
 // Eval Step Adapter
 // =============================================================================
-
-/**
- * Output schema for Eval step
- */
-const EvalOutputSchema = z.object({
-  result: JsonValueSchema.optional(),
-  workflow: z.unknown().optional(), // WorkflowDefinition validated separately
-  subWorkflowOutputs: z.record(z.unknown()).optional(),
-  skipped: z.boolean().optional(),
-});
 
 /** Default timeout for script execution (30 seconds) */
 const DEFAULT_SCRIPT_TIMEOUT = 30000;
@@ -1533,20 +1569,24 @@ async function executeScript(
  * 
  * This enables "Agentic Planning" - the ability for an agent to decide at runtime
  * how to solve a problem by generating and executing a workflow dynamically.
+ * 
+ * IMPORTANT: Returns the full accumulated context so subsequent steps can
+ * access this step's output via {{steps.stepId.result}} interpolation.
  */
 export function createEvalStep(def: EvalStepDefinition, client: OpencodeClient) {
   return createStep({
     id: def.id,
     description: def.description || "Dynamic script evaluation",
-    inputSchema: StepInputSchema,
-    outputSchema: EvalOutputSchema,
+    inputSchema: StepContextSchema,
+    outputSchema: StepContextSchema,
     execute: async ({ inputData }) => {
-      const data = inputData as StepInput;
+      const data = inputData as StepContext;
+      const secretInputs = data.secretInputs || [];
 
       // IDEMPOTENCY CHECK: Skip if this step was already executed (hydration scenario)
       if (data.steps?.[def.id]) {
         client.app.log(`Skipping already-completed step: ${def.id}`, "info");
-        return data.steps[def.id] as z.infer<typeof EvalOutputSchema>;
+        return data;
       }
 
       const ctx = {
@@ -1559,8 +1599,11 @@ export function createEvalStep(def: EvalStepDefinition, client: OpencodeClient) 
       if (def.condition) {
         const evaluated = interpolate(def.condition, ctx);
         if (evaluated === "false" || evaluated === "0" || evaluated === "") {
+          const skipResult = { skipped: true };
           return {
-            skipped: true,
+            inputs: data.inputs || {},
+            steps: { ...ctx.steps, [def.id]: skipResult },
+            secretInputs,
           };
         }
       }
@@ -1579,13 +1622,19 @@ export function createEvalStep(def: EvalStepDefinition, client: OpencodeClient) 
         client.app.log(`Eval step generated dynamic workflow: ${scriptResult.workflow.id}`, "info");
         // Return the workflow for the runner to execute
         // The runner will handle executing the sub-workflow
+        const stepResult = { workflow: scriptResult.workflow as unknown as JsonValue };
         return {
-          workflow: scriptResult.workflow,
+          inputs: data.inputs || {},
+          steps: { ...ctx.steps, [def.id]: stepResult },
+          secretInputs,
         };
       }
 
+      const stepResult = { result: scriptResult.result ?? null };
       return {
-        result: scriptResult.result,
+        inputs: data.inputs || {},
+        steps: { ...ctx.steps, [def.id]: stepResult },
+        secretInputs,
       };
     },
   });

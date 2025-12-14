@@ -71,6 +71,26 @@ import {
   createEvalStep,
 } from "./steps.js";
 import { readFile, writeFile, unlink } from "node:fs/promises";
+import type { JsonValue } from "../types.js";
+
+/**
+ * Helper type for step context returned by all steps.
+ * Steps now return the accumulated context with step outputs in the `steps` field.
+ */
+interface StepContext {
+  inputs: Record<string, JsonValue>;
+  steps: Record<string, JsonValue>;
+  secretInputs?: string[];
+}
+
+/**
+ * Helper to extract a step's output from the accumulated context.
+ * Steps now return { inputs, steps, secretInputs } where the step's
+ * own output is in steps[stepId].
+ */
+function getStepOutput<T = JsonValue>(context: StepContext, stepId: string): T {
+  return context.steps[stepId] as T;
+}
 
 // Helper to simulate successful spawn execution
 function mockSpawnSuccess(stdout: string, stderr = "") {
@@ -146,8 +166,9 @@ describe("Step Adapters", () => {
           resumeData: undefined,
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        // Should return the cached result without calling suspend
-        expect(result).toEqual(previousResult);
+        // Should return context with the cached result
+        const output = getStepOutput<{ resumed: boolean; data: Record<string, unknown> }>(result as StepContext, "approval-step");
+        expect(output).toEqual(previousResult);
       });
 
       it("should not skip when actively resuming this step (resumeData provided)", async () => {
@@ -170,7 +191,8 @@ describe("Step Adapters", () => {
           resumeData: { approved: true, newData: "fresh" },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result).toEqual({
+        const output = getStepOutput<{ resumed: boolean; data: Record<string, unknown> }>(result as StepContext, "approval-step");
+        expect(output).toEqual({
           resumed: true,
           data: { approved: true, newData: "fresh" },
         });
@@ -233,7 +255,8 @@ describe("Step Adapters", () => {
           resumeData: undefined,
         } as unknown as Parameters<typeof suspendB.execute>[0]);
 
-        expect(resultB).toEqual({ resumed: true, data: { approved: true } });
+        const outputB = getStepOutput<{ resumed: boolean; data: Record<string, unknown> }>(resultB as StepContext, "suspend-b");
+        expect(outputB).toEqual({ resumed: true, data: { approved: true } });
         expect(suspendFn).not.toHaveBeenCalled();
 
         // Suspend D should actually suspend (not in previous steps)
@@ -271,7 +294,8 @@ describe("Step Adapters", () => {
           resumeData: undefined,
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result).toEqual({
+        const output = getStepOutput<{ resumed: boolean; data: unknown; skipped: boolean }>(result as StepContext, "conditional-suspend");
+        expect(output).toEqual({
           resumed: false,
           data: undefined,
           skipped: true,
@@ -352,7 +376,8 @@ describe("Step Adapters", () => {
           },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result).toEqual(previousResult);
+        const output = getStepOutput<{ stdout: string; stderr: string; exitCode: number }>(result as StepContext, "build-step");
+        expect(output).toEqual(previousResult);
         expect(mockSpawn).not.toHaveBeenCalled();
         expect(mockClient.app.log).toHaveBeenCalledWith(
           "Skipping already-completed step: build-step",
@@ -373,7 +398,8 @@ describe("Step Adapters", () => {
           inputData: { inputs: {}, steps: {} },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result).toEqual({
+        const output = getStepOutput<{ stdout: string; stderr: string; exitCode: number }>(result as StepContext, "cmd");
+        expect(output).toEqual({
           stdout: "output text",
           stderr: "warning text",
           exitCode: 0,
@@ -532,7 +558,8 @@ describe("Step Adapters", () => {
           inputData: { inputs: {}, steps: {} },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result).toEqual({
+        const output = getStepOutput<{ stdout: string; stderr: string; exitCode: number }>(result as StepContext, "cmd");
+        expect(output).toEqual({
           stdout: "partial output",
           stderr: "not found",
           exitCode: 127,
@@ -551,7 +578,8 @@ describe("Step Adapters", () => {
           inputData: { inputs: { run: "false" }, steps: {} },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result).toEqual({
+        const output = getStepOutput<{ stdout: string; stderr: string; exitCode: number; skipped: boolean }>(result as StepContext, "cmd");
+        expect(output).toEqual({
           stdout: "",
           stderr: "Skipped due to condition",
           exitCode: 0,
@@ -571,7 +599,8 @@ describe("Step Adapters", () => {
           inputData: { inputs: { run: "true" }, steps: {} },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result.stdout).toBe("executed");
+        const output = getStepOutput<{ stdout: string }>(result as StepContext, "cmd");
+        expect(output.stdout).toBe("executed");
         expect(mockSpawn).toHaveBeenCalled();
       });
 
@@ -585,7 +614,8 @@ describe("Step Adapters", () => {
           inputData: { inputs: { empty: "" }, steps: {} },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result.skipped).toBe(true);
+        const output = getStepOutput<{ skipped: boolean }>(result as StepContext, "cmd");
+        expect(output.skipped).toBe(true);
       });
 
       it("should skip when condition evaluates to 0", async () => {
@@ -598,7 +628,8 @@ describe("Step Adapters", () => {
           inputData: { inputs: { zero: "0" }, steps: {} },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result.skipped).toBe(true);
+        const output = getStepOutput<{ skipped: boolean }>(result as StepContext, "cmd");
+        expect(output.skipped).toBe(true);
       });
     });
 
@@ -721,7 +752,8 @@ describe("Step Adapters", () => {
           },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result).toEqual(previousResult);
+        const output = getStepOutput<{ result: { success: boolean; data: string } }>(result as StepContext, "tool-step");
+        expect(output).toEqual(previousResult);
         expect(mockClient.tools.testTool.execute).not.toHaveBeenCalled();
         expect(mockClient.app.log).toHaveBeenCalledWith(
           "Skipping already-completed step: tool-step",
@@ -741,7 +773,8 @@ describe("Step Adapters", () => {
           inputData: { inputs: {}, steps: {} },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result).toEqual({ result: { success: true } });
+        const output = getStepOutput<{ result: { success: boolean } }>(result as StepContext, "tool");
+        expect(output).toEqual({ result: { success: true } });
         expect(mockClient.tools.testTool.execute).toHaveBeenCalledWith({ data: "test" });
       });
 
@@ -827,7 +860,8 @@ describe("Step Adapters", () => {
           inputData: { inputs: { run: "false" }, steps: {} },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result).toEqual({ result: null, skipped: true });
+        const output = getStepOutput<{ result: null; skipped: boolean }>(result as StepContext, "tool");
+        expect(output).toEqual({ result: null, skipped: true });
         expect(mockClient.tools.testTool.execute).not.toHaveBeenCalled();
       });
     });
@@ -861,7 +895,8 @@ describe("Step Adapters", () => {
           },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result).toEqual(previousResult);
+        const output = getStepOutput<{ response: string }>(result as StepContext, "agent-step");
+        expect(output).toEqual(previousResult);
         expect(mockClient.llm.chat).not.toHaveBeenCalled();
         expect(mockClient.app.log).toHaveBeenCalledWith(
           "Skipping already-completed step: agent-step",
@@ -886,7 +921,8 @@ describe("Step Adapters", () => {
           inputData: { inputs: {}, steps: {} },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result).toEqual({ response: "Agent response" });
+        const output = getStepOutput<{ response: string }>(result as StepContext, "review");
+        expect(output).toEqual({ response: "Agent response" });
         expect(mockInvoke).toHaveBeenCalledWith("Review this code", { maxTokens: undefined });
         expect(mockClient.llm.chat).not.toHaveBeenCalled();
       });
@@ -971,7 +1007,8 @@ describe("Step Adapters", () => {
           inputData: { inputs: {}, steps: {} },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result).toEqual({ response: "LLM response" });
+        const output = getStepOutput<{ response: string }>(result as StepContext, "agent");
+        expect(output).toEqual({ response: "LLM response" });
         expect(mockClient.llm.chat).toHaveBeenCalledWith({
           messages: [{ role: "user", content: "Summarize this" }],
           maxTokens: undefined,
@@ -1075,7 +1112,8 @@ describe("Step Adapters", () => {
           inputData: { inputs: { run: "false" }, steps: {} },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result).toEqual({ response: "", skipped: true });
+        const output = getStepOutput<{ response: string; skipped: boolean }>(result as StepContext, "agent");
+        expect(output).toEqual({ response: "", skipped: true });
         expect(mockClient.llm.chat).not.toHaveBeenCalled();
       });
 
@@ -1092,7 +1130,8 @@ describe("Step Adapters", () => {
           inputData: { inputs: { run: "false" }, steps: {} },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result).toEqual({ response: "", skipped: true });
+        const output = getStepOutput<{ response: string; skipped: boolean }>(result as StepContext, "agent");
+        expect(output).toEqual({ response: "", skipped: true });
         expect(mockInvoke).not.toHaveBeenCalled();
       });
     });
@@ -1136,7 +1175,8 @@ describe("Step Adapters", () => {
           },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result).toEqual(previousResult);
+        const output = getStepOutput<{ status: number; body: { success: boolean }; text: string; headers: Record<string, string> }>(result as StepContext, "http-step");
+        expect(output).toEqual(previousResult);
         expect(global.fetch).not.toHaveBeenCalled();
       });
     });
@@ -1154,9 +1194,10 @@ describe("Step Adapters", () => {
           inputData: { inputs: {}, steps: {} },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result.status).toBe(200);
-        expect(result.body).toEqual({ data: "response" });
-        expect(result.text).toBe('{"data":"response"}');
+        const output = getStepOutput<{ status: number; body: unknown; text: string }>(result as StepContext, "http");
+        expect(output.status).toBe(200);
+        expect(output.body).toEqual({ data: "response" });
+        expect(output.text).toBe('{"data":"response"}');
         expect(global.fetch).toHaveBeenCalledWith("https://api.example.com/data", {
           method: "GET",
           headers: {},
@@ -1271,8 +1312,9 @@ describe("Step Adapters", () => {
           inputData: { inputs: {}, steps: {} },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result.body).toBeNull();
-        expect(result.text).toBe("plain text response");
+        const output = getStepOutput<{ body: unknown; text: string }>(result as StepContext, "http");
+        expect(output.body).toBeNull();
+        expect(output.text).toBe("plain text response");
       });
     });
 
@@ -1319,8 +1361,9 @@ describe("Step Adapters", () => {
           inputData: { inputs: {}, steps: {} },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result.status).toBe(404);
-        expect(result.text).toBe("Not Found");
+        const output = getStepOutput<{ status: number; text: string }>(result as StepContext, "http");
+        expect(output.status).toBe(404);
+        expect(output.text).toBe("Not Found");
       });
     });
 
@@ -1338,7 +1381,8 @@ describe("Step Adapters", () => {
           inputData: { inputs: { notify: "false" }, steps: {} },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result).toEqual({
+        const output = getStepOutput<{ status: number; body: null; text: string; headers: Record<string, string>; skipped: boolean }>(result as StepContext, "http");
+        expect(output).toEqual({
           status: 0,
           body: null,
           text: "",
@@ -1377,7 +1421,8 @@ describe("Step Adapters", () => {
           },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result).toEqual(previousResult);
+        const output = getStepOutput<{ success: boolean }>(result as StepContext, "file-step");
+        expect(output).toEqual(previousResult);
         expect(writeFile).not.toHaveBeenCalled();
       });
     });
@@ -1397,7 +1442,8 @@ describe("Step Adapters", () => {
           inputData: { inputs: {}, steps: {} },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result).toEqual({ content: "file contents here" });
+        const output = getStepOutput<{ content: string }>(result as StepContext, "read");
+        expect(output).toEqual({ content: "file contents here" });
         expect(readFile).toHaveBeenCalledWith("/tmp/input.txt", "utf-8");
       });
 
@@ -1435,7 +1481,8 @@ describe("Step Adapters", () => {
           inputData: { inputs: {}, steps: {} },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result).toEqual({ success: true });
+        const output = getStepOutput<{ success: boolean }>(result as StepContext, "write");
+        expect(output).toEqual({ success: true });
         expect(writeFile).toHaveBeenCalledWith("/tmp/output.txt", "hello world", "utf-8");
       });
 
@@ -1513,7 +1560,8 @@ describe("Step Adapters", () => {
           inputData: { inputs: {}, steps: {} },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result).toEqual({ success: true });
+        const output = getStepOutput<{ success: boolean }>(result as StepContext, "delete");
+        expect(output).toEqual({ success: true });
         expect(unlink).toHaveBeenCalledWith("/tmp/temp.txt");
       });
 
@@ -1550,7 +1598,8 @@ describe("Step Adapters", () => {
           inputData: { inputs: { write: "false" }, steps: {} },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result).toEqual({ skipped: true });
+        const output = getStepOutput<{ skipped: boolean }>(result as StepContext, "write");
+        expect(output).toEqual({ skipped: true });
         expect(writeFile).not.toHaveBeenCalled();
       });
     });
@@ -1590,7 +1639,8 @@ describe("Step Adapters", () => {
           },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result).toEqual(previousResult);
+        const output = getStepOutput<{ completed: boolean; durationMs: number }>(result as StepContext, "wait-step");
+        expect(output).toEqual(previousResult);
       });
     });
 
@@ -1611,7 +1661,8 @@ describe("Step Adapters", () => {
 
         const result = await executePromise;
 
-        expect(result).toEqual({
+        const output = getStepOutput<{ completed: boolean; durationMs: number }>(result as StepContext, "wait-5s");
+        expect(output).toEqual({
           completed: true,
           durationMs: 5000,
         });
@@ -1632,7 +1683,8 @@ describe("Step Adapters", () => {
 
         const result = await executePromise;
 
-        expect(result).toEqual({
+        const output = getStepOutput<{ completed: boolean; durationMs: number }>(result as StepContext, "wait-100ms");
+        expect(output).toEqual({
           completed: true,
           durationMs: 100,
         });
@@ -1673,7 +1725,8 @@ describe("Step Adapters", () => {
           inputData: { inputs: { shouldWait: "false" }, steps: {} },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result).toEqual({
+        const output = getStepOutput<{ completed: boolean; durationMs: number; skipped: boolean }>(result as StepContext, "conditional-wait");
+        expect(output).toEqual({
           completed: false,
           durationMs: 0,
           skipped: true,
@@ -1696,7 +1749,8 @@ describe("Step Adapters", () => {
 
         const result = await executePromise;
 
-        expect(result).toEqual({
+        const output = getStepOutput<{ completed: boolean; durationMs: number }>(result as StepContext, "conditional-wait");
+        expect(output).toEqual({
           completed: true,
           durationMs: 1000,
         });
@@ -1714,7 +1768,8 @@ describe("Step Adapters", () => {
           inputData: { inputs: { empty: "" }, steps: {} },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result.skipped).toBe(true);
+        const output = getStepOutput<{ skipped: boolean }>(result as StepContext, "wait");
+        expect(output.skipped).toBe(true);
       });
 
       it("should skip when condition evaluates to 0", async () => {
@@ -1729,7 +1784,8 @@ describe("Step Adapters", () => {
           inputData: { inputs: { zero: "0" }, steps: {} },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result.skipped).toBe(true);
+        const output = getStepOutput<{ skipped: boolean }>(result as StepContext, "wait");
+        expect(output.skipped).toBe(true);
       });
     });
   });
@@ -1767,7 +1823,8 @@ describe("Step Adapters", () => {
           },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result).toEqual(previousResult);
+        const output = getStepOutput<{ results: unknown[]; count: number }>(result as StepContext, "iterator-step");
+        expect(output).toEqual(previousResult);
         expect(mockSpawn).not.toHaveBeenCalled();
         expect(mockClient.app.log).toHaveBeenCalledWith(
           "Skipping already-completed step: iterator-step",
@@ -1807,8 +1864,9 @@ describe("Step Adapters", () => {
           },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result.count).toBe(3);
-        expect(result.results).toHaveLength(3);
+        const output = getStepOutput<{ count: number; results: unknown[] }>(result as StepContext, "lint-files");
+        expect(output.count).toBe(3);
+        expect(output.results).toHaveLength(3);
         expect(mockSpawn).toHaveBeenCalledTimes(3);
         expect(mockSpawn).toHaveBeenCalledWith("/bin/sh", ["-c", "eslint src/a.ts"], expect.any(Object));
         expect(mockSpawn).toHaveBeenCalledWith("/bin/sh", ["-c", "eslint src/b.ts"], expect.any(Object));
@@ -1865,7 +1923,8 @@ describe("Step Adapters", () => {
           },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result.count).toBe(2);
+        const output = getStepOutput<{ count: number }>(result as StepContext, "lint-found-files");
+        expect(output.count).toBe(2);
         expect(mockSpawn).toHaveBeenCalledWith("/bin/sh", ["-c", "lint file1.ts"], expect.any(Object));
         expect(mockSpawn).toHaveBeenCalledWith("/bin/sh", ["-c", "lint file2.ts"], expect.any(Object));
       });
@@ -1922,8 +1981,9 @@ describe("Step Adapters", () => {
           },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result.count).toBe(0);
-        expect(result.results).toHaveLength(0);
+        const output = getStepOutput<{ count: number; results: unknown[] }>(result as StepContext, "empty-iter");
+        expect(output.count).toBe(0);
+        expect(output.results).toHaveLength(0);
         expect(mockSpawn).not.toHaveBeenCalled();
       });
 
@@ -1949,7 +2009,8 @@ describe("Step Adapters", () => {
           },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result.count).toBe(2);
+        const output = getStepOutput<{ count: number }>(result as StepContext, "process-files");
+        expect(output.count).toBe(2);
         expect(mockClient.tools.testTool.execute).toHaveBeenCalledTimes(2);
         expect(mockClient.tools.testTool.execute).toHaveBeenCalledWith({ path: "/tmp/a.txt" });
         expect(mockClient.tools.testTool.execute).toHaveBeenCalledWith({ path: "/tmp/b.txt" });
@@ -2038,7 +2099,8 @@ describe("Step Adapters", () => {
           },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result).toEqual({
+        const output = getStepOutput<{ results: unknown[]; count: number; skipped: boolean }>(result as StepContext, "conditional-iter");
+        expect(output).toEqual({
           results: [],
           count: 0,
           skipped: true,
@@ -2077,7 +2139,8 @@ describe("Step Adapters", () => {
           },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result.count).toBe(1);
+        const output = getStepOutput<{ count: number }>(result as StepContext, "conditional-iter");
+        expect(output.count).toBe(1);
         expect(mockSpawn).toHaveBeenCalled();
       });
     });
@@ -2114,16 +2177,17 @@ describe("Step Adapters", () => {
           },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result.count).toBe(2);
+        const output = getStepOutput<{ count: number; results: Array<Record<string, unknown>> }>(result as StepContext, "seq-iter");
+        expect(output.count).toBe(2);
         // Should be called 4 times total (2 items * 2 steps)
         expect(mockSpawn).toHaveBeenCalledTimes(4);
 
         // Verify multi-step mode returns object with all step results per iteration
-        expect(result.results).toHaveLength(2);
-        expect(result.results[0]).toHaveProperty("step1");
-        expect(result.results[0]).toHaveProperty("step2");
-        expect(result.results[1]).toHaveProperty("step1");
-        expect(result.results[1]).toHaveProperty("step2");
+        expect(output.results).toHaveLength(2);
+        expect(output.results[0]).toHaveProperty("step1");
+        expect(output.results[0]).toHaveProperty("step2");
+        expect(output.results[1]).toHaveProperty("step1");
+        expect(output.results[1]).toHaveProperty("step2");
       });
 
       it("should allow later steps to access earlier step results within runSteps", async () => {
@@ -2233,7 +2297,8 @@ describe("Step Adapters", () => {
           },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result).toEqual({ result: 42 });
+        const output = getStepOutput<{ result: number }>(result as StepContext, "eval-simple");
+        expect(output).toEqual({ result: 42 });
       });
 
       it("should access inputs in the script", async () => {
@@ -2253,7 +2318,8 @@ describe("Step Adapters", () => {
           },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result).toEqual({ result: "World!" });
+        const output = getStepOutput<{ result: string }>(result as StepContext, "eval-inputs");
+        expect(output).toEqual({ result: "World!" });
       });
 
       it("should access step outputs in the script", async () => {
@@ -2273,7 +2339,8 @@ describe("Step Adapters", () => {
           },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result).toEqual({ result: 10 });
+        const output = getStepOutput<{ result: number }>(result as StepContext, "eval-steps");
+        expect(output).toEqual({ result: 10 });
       });
 
       it("should return object results", async () => {
@@ -2293,7 +2360,8 @@ describe("Step Adapters", () => {
           },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result).toEqual({ result: { sum: 7, product: 12 } });
+        const output = getStepOutput<{ result: { sum: number; product: number } }>(result as StepContext, "eval-object");
+        expect(output).toEqual({ result: { sum: 7, product: 12 } });
       });
 
       it("should return array results", async () => {
@@ -2313,7 +2381,8 @@ describe("Step Adapters", () => {
           },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result).toEqual({ result: [2, 4, 6] });
+        const output = getStepOutput<{ result: number[] }>(result as StepContext, "eval-array");
+        expect(output).toEqual({ result: [2, 4, 6] });
       });
     });
 
@@ -2332,7 +2401,8 @@ describe("Step Adapters", () => {
           inputData: { inputs: {}, steps: {} },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result).toEqual({ result: "undefined" });
+        const output = getStepOutput<{ result: string }>(result as StepContext, "eval-no-require");
+        expect(output).toEqual({ result: "undefined" });
       });
 
       it("should not have access to process", async () => {
@@ -2349,7 +2419,8 @@ describe("Step Adapters", () => {
           inputData: { inputs: {}, steps: {} },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result).toEqual({ result: "undefined" });
+        const output = getStepOutput<{ result: string }>(result as StepContext, "eval-no-process");
+        expect(output).toEqual({ result: "undefined" });
       });
 
       it("should not have access to fetch", async () => {
@@ -2366,7 +2437,8 @@ describe("Step Adapters", () => {
           inputData: { inputs: {}, steps: {} },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result).toEqual({ result: "undefined" });
+        const output = getStepOutput<{ result: string }>(result as StepContext, "eval-no-fetch");
+        expect(output).toEqual({ result: "undefined" });
       });
 
       it("should have access to safe built-ins", async () => {
@@ -2390,7 +2462,8 @@ describe("Step Adapters", () => {
           inputData: { inputs: {}, steps: {} },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result).toEqual({
+        const output = getStepOutput<{ result: { hasJSON: boolean; hasMath: boolean; hasDate: boolean; hasArray: boolean } }>(result as StepContext, "eval-builtins");
+        expect(output).toEqual({
           result: {
             hasJSON: true,
             hasMath: true,
@@ -2423,7 +2496,8 @@ describe("Step Adapters", () => {
         } as unknown as Parameters<typeof step.execute>[0]);
 
         // The script should still have access to the original frozen inputs
-        expect(result).toEqual({ result: "value" });
+        const output = getStepOutput<{ result: string }>(result as StepContext, "eval-frozen");
+        expect(output).toEqual({ result: "value" });
       });
     });
 
@@ -2461,7 +2535,8 @@ describe("Step Adapters", () => {
           inputData: { inputs: {}, steps: {} },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result).toEqual({ result: "fast" });
+        const output = getStepOutput<{ result: string }>(result as StepContext, "eval-custom-timeout");
+        expect(output).toEqual({ result: "fast" });
       });
     });
 
@@ -2484,7 +2559,8 @@ describe("Step Adapters", () => {
           },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result).toEqual({ skipped: true });
+        const output = getStepOutput<{ skipped: boolean }>(result as StepContext, "eval-conditional");
+        expect(output).toEqual({ skipped: true });
       });
 
       it("should execute when condition is true", async () => {
@@ -2505,7 +2581,8 @@ describe("Step Adapters", () => {
           },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result).toEqual({ result: "executed" });
+        const output = getStepOutput<{ result: string }>(result as StepContext, "eval-conditional");
+        expect(output).toEqual({ result: "executed" });
       });
     });
 
@@ -2529,7 +2606,8 @@ describe("Step Adapters", () => {
           },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result).toEqual({ result: "previous result" });
+        const output = getStepOutput<{ result: string }>(result as StepContext, "eval-idempotent");
+        expect(output).toEqual({ result: "previous result" });
       });
     });
 
@@ -2557,8 +2635,9 @@ describe("Step Adapters", () => {
           inputData: { inputs: {}, steps: {} },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(result).toHaveProperty("workflow");
-        expect(result.workflow).toMatchObject({
+        const output = getStepOutput<{ workflow: unknown }>(result as StepContext, "eval-workflow");
+        expect(output).toHaveProperty("workflow");
+        expect(output.workflow).toMatchObject({
           id: "dynamic-workflow",
           steps: [{ id: "step1", type: "shell", command: "echo hello" }],
         });
