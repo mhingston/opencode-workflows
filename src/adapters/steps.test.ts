@@ -601,8 +601,58 @@ describe("Step Adapters", () => {
         expect(result.skipped).toBe(true);
       });
     });
+
+    describe("safe mode", () => {
+      it("should use spawn without shell when safe=true", async () => {
+        mockSpawnSuccess("safe output");
+        const step = createShellStep(
+          { 
+            id: "safe-cmd", 
+            type: "shell", 
+            command: "echo", 
+            safe: true, 
+            args: ["hello", "{{inputs.name}}"] 
+          },
+          mockClient
+        );
+
+        await step.execute({
+          inputData: { inputs: { name: "world" }, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        // Verify spawn was called with the command and args array directly
+        // NOT with /bin/sh -c
+        expect(mockSpawn).toHaveBeenCalledWith(
+          "echo",
+          ["hello", "world"],
+          expect.objectContaining({ env: expect.any(Object) })
+        );
+      });
+
+      it("should throw if args are missing in safe mode", async () => {
+        const step = createShellStep(
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          { 
+            id: "invalid-safe", 
+            type: "shell", 
+            command: "echo", 
+            safe: true 
+            // args missing - invalid config
+          } as unknown as Parameters<typeof createShellStep>[0],
+          mockClient
+        );
+
+        await expect(
+          step.execute({
+            inputData: { inputs: {}, steps: {} },
+          } as unknown as Parameters<typeof step.execute>[0])
+        ).rejects.toThrow("Safe mode requires 'args'");
+      });
+    });
   });
 
+  // =============================================================================
+  // Tool Step Tests
   // =============================================================================
   // Tool Step Tests
   // =============================================================================
@@ -1990,6 +2040,123 @@ describe("Step Adapters", () => {
 
         expect(result.count).toBe(1);
         expect(mockSpawn).toHaveBeenCalled();
+      });
+    });
+
+    describe("runSteps (sequential processing)", () => {
+      it("should execute a sequence of steps (runSteps) for each item", async () => {
+        // Mock spawn for sequence: [echo item, echo prev-result] x 2 items
+        mockSpawn.mockImplementation(() => {
+          const proc = createMockProcess();
+          setImmediate(() => {
+            proc.stdout.emit("data", "result");
+            proc.emit("close", 0, null);
+          });
+          return proc;
+        });
+
+        const step = createIteratorStep(
+          {
+            id: "seq-iter",
+            type: "iterator",
+            items: "{{inputs.items}}",
+            runSteps: [
+              { id: "step1", type: "shell", command: "echo {{inputs.item}}" },
+              { id: "step2", type: "shell", command: "echo {{steps.step1.stdout}}" }
+            ],
+          },
+          mockClient
+        );
+
+        const result = await step.execute({
+          inputData: {
+            inputs: { items: ["a", "b"] },
+            steps: {},
+          },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result.count).toBe(2);
+        // Should be called 4 times total (2 items * 2 steps)
+        expect(mockSpawn).toHaveBeenCalledTimes(4);
+
+        // Verify multi-step mode returns object with all step results per iteration
+        expect(result.results).toHaveLength(2);
+        expect(result.results[0]).toHaveProperty("step1");
+        expect(result.results[0]).toHaveProperty("step2");
+        expect(result.results[1]).toHaveProperty("step1");
+        expect(result.results[1]).toHaveProperty("step2");
+      });
+
+      it("should allow later steps to access earlier step results within runSteps", async () => {
+        // First call returns "first-result", second returns whatever was passed
+        let callCount = 0;
+        mockSpawn.mockImplementation(() => {
+          const proc = createMockProcess();
+          setImmediate(() => {
+            callCount++;
+            proc.stdout.emit("data", callCount === 1 ? "first-result" : "processed");
+            proc.emit("close", 0, null);
+          });
+          return proc;
+        });
+
+        const step = createIteratorStep(
+          {
+            id: "context-test",
+            type: "iterator",
+            items: "{{inputs.items}}",
+            runSteps: [
+              { id: "fetch", type: "shell", command: "echo data" },
+              { id: "process", type: "shell", command: "process {{steps.fetch.stdout}}" }
+            ],
+          },
+          mockClient
+        );
+
+        await step.execute({
+          inputData: {
+            inputs: { items: ["x"] },
+            steps: {},
+          },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        // Verify the second step received the interpolated value from the first step
+        expect(mockSpawn).toHaveBeenCalledTimes(2);
+        // The second call should reference the first step's result
+        expect(mockSpawn).toHaveBeenNthCalledWith(
+          2,
+          "/bin/sh",
+          ["-c", "process first-result"],
+          expect.any(Object)
+        );
+      });
+
+      it("should throw error when both runStep and runSteps are provided", () => {
+        expect(() => {
+          createIteratorStep(
+            {
+              id: "invalid-iter",
+              type: "iterator",
+              items: "{{inputs.items}}",
+              runStep: { type: "shell", command: "echo single" },
+              runSteps: [{ id: "s1", type: "shell", command: "echo multi" }],
+            } as unknown as Parameters<typeof createIteratorStep>[0],
+            mockClient
+          );
+        }).toThrow(/cannot have both/);
+      });
+
+      it("should throw error when neither runStep nor runSteps are provided", () => {
+        expect(() => {
+          createIteratorStep(
+            {
+              id: "empty-iter",
+              type: "iterator",
+              items: "{{inputs.items}}",
+            } as unknown as Parameters<typeof createIteratorStep>[0],
+            mockClient
+          );
+        }).toThrow(/must have either/);
       });
     });
   });

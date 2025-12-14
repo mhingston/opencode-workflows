@@ -411,6 +411,26 @@ Execute shell commands:
 | `failOnError` | `boolean` | `true` | Fail workflow if command exits non-zero |
 | `timeout` | `number` | - | Step-specific timeout in milliseconds |
 | `retry` | `object` | - | Retry configuration: `{ attempts: number, delay?: number }` |
+| `safe` | `boolean` | `false` | Use safe mode to prevent shell injection |
+| `args` | `array` | - | Command arguments (required when `safe: true`) |
+
+**Safe Mode (Recommended for User Input):**
+
+To prevent shell injection attacks when using user-provided input, use `safe: true` and provide arguments as an array. This bypasses the shell entirely by spawning the command directly:
+
+```yaml
+- id: secure-echo
+  type: shell
+  command: echo
+  safe: true
+  args: ["Hello", "{{inputs.userInput}}"]  # userInput cannot inject commands here
+```
+
+In safe mode:
+- The command is executed directly without a shell interpreter
+- Shell metacharacters (`;`, `|`, `&`, etc.) in arguments are treated as literal text
+- The `args` array is required and each argument is passed separately to the process
+- This is the recommended approach when incorporating untrusted input
 
 ### Tool Step
 Invoke OpenCode tools:
@@ -588,11 +608,42 @@ Iterator step output includes:
 | Option | Type | Description |
 |--------|------|-------------|
 | `items` | `string` | Interpolation expression resolving to an array (required) |
-| `runStep` | `object` | Step definition to execute for each item (required). Supports shell, tool, agent, http, and file step types. |
+| `runStep` | `object` | Step definition to execute for each item. Supports shell, tool, agent, http, and file step types. |
+| `runSteps` | `array` | Array of step definitions to execute sequentially for each item (alternative to `runStep`). |
+
+**Sequential Processing:**
+
+To run multiple steps for each item, use `runSteps` instead of `runStep`. Inner steps can access results from previous steps in the sequence:
+
+```yaml
+- id: process-repos
+  type: iterator
+  items: "{{inputs.repos}}"
+  runSteps:
+    - id: clone
+      type: shell
+      command: git clone {{inputs.item.url}}
+    - id: test
+      type: shell
+      command: npm test
+      cwd: "./{{inputs.item.name}}"
+```
+
+When using `runSteps`, the output for each iteration contains results from all steps in the sequence:
+```json
+{
+  "results": [
+    { "clone": { "stdout": "...", "exitCode": 0 }, "test": { "stdout": "...", "exitCode": 0 } },
+    { "clone": { "stdout": "...", "exitCode": 0 }, "test": { "stdout": "...", "exitCode": 0 } }
+  ],
+  "count": 2
+}
+```
 
 **Limitations:**
 - Nested iterators are not supported
 - Suspend steps are not supported within iterators
+- Either `runStep` or `runSteps` must be provided, but not both
 
 ### Eval Step
 Execute JavaScript code in a sandboxed environment for dynamic logic and workflow generation:
@@ -772,6 +823,50 @@ Steps can include a `condition` to control execution:
 }
 ```
 The step is skipped if the condition evaluates to `"false"`, `"0"`, or `""`.
+
+## Lifecycle Hooks
+
+Workflows support cleanup and failure handling blocks. These steps run outside the main dependency graph.
+
+### onFailure
+
+Runs only if the workflow fails (throws an error). The error details are available in `{{inputs.error}}`:
+
+```yaml
+onFailure:
+  - id: alert-slack
+    type: http
+    method: POST
+    url: "{{env.SLACK_WEBHOOK}}"
+    body:
+      text: "Workflow failed at step {{inputs.error.stepId}}: {{inputs.error.message}}"
+```
+
+The error context includes:
+- `{{inputs.error.message}}` - The error message
+- `{{inputs.error.stepId}}` - The ID of the step that failed (if applicable)
+- `{{inputs.error.stack}}` - The error stack trace (if available)
+
+### finally
+
+Runs after the workflow finishes, regardless of success or failure. Useful for resource cleanup:
+
+```yaml
+finally:
+  - id: cleanup-temp
+    type: shell
+    command: rm -rf ./temp-build-artifacts
+  - id: release-lock
+    type: http
+    method: DELETE
+    url: "{{env.LOCK_SERVICE}}/locks/{{run.id}}"
+```
+
+**Notes:**
+- `onFailure` steps run before `finally` steps
+- Steps within each block run sequentially in array order
+- These blocks cannot contain `suspend` or `iterator` steps
+- The workflow status reflects the main execution, not the cleanup blocks
 
 ## Dependencies
 

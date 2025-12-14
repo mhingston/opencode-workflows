@@ -532,6 +532,185 @@ describe("WorkflowRunner", () => {
   });
 });
 
+describe("Lifecycle Hooks", () => {
+  let runner: WorkflowRunner;
+  let mockFactory: WorkflowFactory;
+  let mockStorage: WorkflowStorage;
+  let mockLogger: Logger;
+  let mockMastraRun: {
+    start: ReturnType<typeof vi.fn>;
+    resume: ReturnType<typeof vi.fn>;
+  };
+  let mockWorkflow: {
+    createRunAsync: ReturnType<typeof vi.fn>;
+  };
+  let mockClient: { tools: Record<string, unknown>; app: { log: ReturnType<typeof vi.fn> } };
+
+  beforeEach(() => {
+    mockLogger = {
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+    };
+
+    mockMastraRun = {
+      start: vi.fn().mockResolvedValue({ status: "completed", steps: {} }),
+      resume: vi.fn().mockResolvedValue({ status: "completed", steps: {} }),
+    };
+
+    mockWorkflow = {
+      createRunAsync: vi.fn().mockResolvedValue(mockMastraRun),
+    };
+
+    mockClient = {
+      tools: {},
+      app: { log: vi.fn() },
+    };
+
+    mockFactory = {
+      get: vi.fn().mockReturnValue({
+        workflow: mockWorkflow,
+        id: "test-workflow",
+      }),
+      has: vi.fn().mockReturnValue(true),
+      compile: vi.fn(),
+      list: vi.fn().mockReturnValue(["test-workflow"]),
+      clear: vi.fn(),
+      compileAll: vi.fn(),
+      getClient: vi.fn().mockReturnValue(mockClient),
+    } as unknown as WorkflowFactory;
+
+    mockStorage = {
+      init: vi.fn().mockResolvedValue(undefined),
+      saveRun: vi.fn().mockResolvedValue(undefined),
+      loadRun: vi.fn().mockResolvedValue(null),
+      loadAllRuns: vi.fn().mockResolvedValue([]),
+      loadActiveRuns: vi.fn().mockResolvedValue([]),
+      updateRun: vi.fn().mockResolvedValue(undefined),
+      deleteRun: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+    } as unknown as WorkflowStorage;
+
+    runner = new WorkflowRunner(mockFactory, mockLogger, mockStorage);
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("should execute onFailure steps when workflow fails", async () => {
+    // Mock a workflow that fails
+    mockMastraRun.start.mockRejectedValue(new Error("Main task failed"));
+    
+    // Mock the factory to return a definition with onFailure
+    const workflowWithFailure: WorkflowFactoryResult = {
+      workflow: mockWorkflow,
+      id: "fail-wf",
+      onFailureSteps: [
+        { id: "cleanup", type: "shell", command: "echo cleaning" }
+      ]
+    };
+    (mockFactory.get as ReturnType<typeof vi.fn>).mockReturnValue(workflowWithFailure);
+
+    await runner.run("fail-wf");
+    
+    // Wait for async execution
+    await new Promise((r) => setTimeout(r, 100));
+
+    const runs = runner.getAllRuns();
+    expect(runs.length).toBe(1);
+    const run = runs[0];
+    
+    // Verify main status is failed
+    expect(run.status).toBe("failed");
+    expect(run.error).toBe("Error: Main task failed");
+    
+    // Verify onFailure block was attempted to execute
+    expect(mockLogger.info).toHaveBeenCalledWith(
+      expect.stringContaining("Executing onFailure block")
+    );
+  });
+
+  it("should execute finally steps after success", async () => {
+    mockMastraRun.start.mockResolvedValue({ status: "completed", steps: {} });
+    
+    const workflowWithFinally: WorkflowFactoryResult = {
+      workflow: mockWorkflow,
+      id: "finally-wf",
+      finallySteps: [
+        { id: "teardown", type: "shell", command: "echo done" }
+      ]
+    };
+    (mockFactory.get as ReturnType<typeof vi.fn>).mockReturnValue(workflowWithFinally);
+
+    await runner.run("finally-wf");
+    await new Promise((r) => setTimeout(r, 100));
+
+    const runs = runner.getAllRuns();
+    expect(runs.length).toBe(1);
+    const run = runs[0];
+    expect(run.status).toBe("completed");
+    
+    // Verify finally block was attempted to execute
+    expect(mockLogger.info).toHaveBeenCalledWith(
+      expect.stringContaining("Executing finally block")
+    );
+  });
+
+  it("should execute both onFailure and finally steps when workflow fails", async () => {
+    mockMastraRun.start.mockRejectedValue(new Error("Task failed"));
+    
+    const workflowWithBoth: WorkflowFactoryResult = {
+      workflow: mockWorkflow,
+      id: "both-hooks-wf",
+      onFailureSteps: [
+        { id: "error-handler", type: "shell", command: "echo error" }
+      ],
+      finallySteps: [
+        { id: "cleanup", type: "shell", command: "echo cleanup" }
+      ]
+    };
+    (mockFactory.get as ReturnType<typeof vi.fn>).mockReturnValue(workflowWithBoth);
+
+    await runner.run("both-hooks-wf");
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Verify both blocks were attempted
+    expect(mockLogger.info).toHaveBeenCalledWith(
+      expect.stringContaining("Executing onFailure block")
+    );
+    expect(mockLogger.info).toHaveBeenCalledWith(
+      expect.stringContaining("Executing finally block")
+    );
+  });
+
+  it("should not execute onFailure steps when workflow succeeds", async () => {
+    mockMastraRun.start.mockResolvedValue({ status: "completed", steps: {} });
+    
+    const workflowWithFailure: WorkflowFactoryResult = {
+      workflow: mockWorkflow,
+      id: "success-wf",
+      onFailureSteps: [
+        { id: "cleanup", type: "shell", command: "echo cleaning" }
+      ]
+    };
+    (mockFactory.get as ReturnType<typeof vi.fn>).mockReturnValue(workflowWithFailure);
+
+    await runner.run("success-wf");
+    await new Promise((r) => setTimeout(r, 100));
+
+    const runs = runner.getAllRuns();
+    expect(runs.length).toBe(1);
+    expect(runs[0].status).toBe("completed");
+    
+    // Verify onFailure block was NOT executed
+    expect(mockLogger.info).not.toHaveBeenCalledWith(
+      expect.stringContaining("Executing onFailure block")
+    );
+  });
+});
+
 describe("WorkflowRunner without storage", () => {
   let runner: WorkflowRunner;
   let mockFactory: WorkflowFactory;

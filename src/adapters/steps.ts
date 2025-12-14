@@ -1555,7 +1555,7 @@ export function createEvalStep(def: EvalStepDefinition, client: OpencodeClient) 
       }
 
       const timeout = def.scriptTimeout ?? DEFAULT_SCRIPT_TIMEOUT;
-      client.app.log(`Executing eval script (timeout: ${timeout}ms)`, "info");
+      client.app.log(`Executing eval script in sandbox (timeout: ${timeout}ms)`, "info");
 
       const scriptResult = await executeScript(def.script, ctx, timeout);
 

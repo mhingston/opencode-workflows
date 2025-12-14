@@ -240,3 +240,135 @@ describe("WorkflowStorage serialization", () => {
     expect(mockLogger.debug).toHaveBeenCalledWith("Saved run: optional-test");
   });
 });
+
+describe("WorkflowStorage retry logic", () => {
+  let storage: WorkflowStorage;
+  let mockLogger: Logger;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    mockLogger = {
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+    };
+
+    storage = new WorkflowStorage(
+      { dbPath: "/tmp/retry-test.db" },
+      mockLogger
+    );
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("should retry on SQLITE_BUSY error and succeed", async () => {
+    const run: WorkflowRun = {
+      runId: "retry-test",
+      workflowId: "test",
+      status: "pending",
+      inputs: {},
+      stepResults: {},
+      startedAt: new Date(),
+    };
+
+    // Initialize storage first
+    await storage.init();
+
+    // Get the internal store and mock its insert to fail twice then succeed
+    const internalStore = (storage as unknown as { store: { insert: ReturnType<typeof vi.fn> } }).store;
+    const originalInsert = internalStore.insert;
+    let callCount = 0;
+
+    internalStore.insert = vi.fn().mockImplementation(async (...args: unknown[]) => {
+      callCount++;
+      if (callCount <= 2) {
+        throw new Error("SQLITE_BUSY: database is locked");
+      }
+      return originalInsert.call(internalStore, ...args);
+    });
+
+    // Start the save operation
+    const savePromise = storage.saveRun(run);
+
+    // Advance timers to allow retries
+    await vi.advanceTimersByTimeAsync(100);
+    await vi.advanceTimersByTimeAsync(200);
+    await vi.advanceTimersByTimeAsync(400);
+
+    await savePromise;
+
+    // Verify retry was attempted (3 calls: 2 failures + 1 success)
+    expect(internalStore.insert).toHaveBeenCalledTimes(3);
+
+    // Verify debug logging for retries
+    expect(mockLogger.debug).toHaveBeenCalledWith(
+      expect.stringContaining("Retrying in")
+    );
+  });
+
+  it("should fail after max retry attempts", async () => {
+    const run: WorkflowRun = {
+      runId: "fail-test",
+      workflowId: "test",
+      status: "pending",
+      inputs: {},
+      stepResults: {},
+      startedAt: new Date(),
+    };
+
+    // Initialize storage first
+    await storage.init();
+
+    // Get the internal store and mock to always fail with SQLITE_BUSY
+    const internalStore = (storage as unknown as { store: { insert: ReturnType<typeof vi.fn> } }).store;
+    internalStore.insert = vi.fn().mockImplementation(async () => {
+      throw new Error("SQLITE_BUSY: database is locked");
+    });
+
+    // Start the save operation and immediately attach error handler
+    let caughtError: Error | undefined;
+    const savePromise = storage.saveRun(run).catch((err) => {
+      caughtError = err as Error;
+    });
+
+    // Advance timers enough for all retry attempts (exponential backoff with jitter)
+    await vi.runAllTimersAsync();
+
+    await savePromise;
+
+    // Verify the error was caught
+    expect(caughtError).toBeDefined();
+    expect(caughtError?.message).toContain("SQLITE_BUSY");
+
+    // Default maxAttempts is 5
+    expect(internalStore.insert).toHaveBeenCalledTimes(5);
+  });
+
+  it("should not retry non-retryable errors", async () => {
+    const run: WorkflowRun = {
+      runId: "no-retry-test",
+      workflowId: "test",
+      status: "pending",
+      inputs: {},
+      stepResults: {},
+      startedAt: new Date(),
+    };
+
+    // Initialize storage first
+    await storage.init();
+
+    // Get the internal store and mock to fail with a non-retryable error
+    const internalStore = (storage as unknown as { store: { insert: ReturnType<typeof vi.fn> } }).store;
+    internalStore.insert = vi.fn().mockImplementation(async () => {
+      throw new Error("Some other database error");
+    });
+
+    await expect(storage.saveRun(run)).rejects.toThrow("Some other database error");
+
+    // Should only be called once (no retries)
+    expect(internalStore.insert).toHaveBeenCalledTimes(1);
+  });
+});
