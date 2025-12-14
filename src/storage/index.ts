@@ -115,10 +115,66 @@ export class WorkflowStorage {
   /** Map of workflow IDs to their secret input keys */
   private workflowSecrets = new Map<string, string[]>();
 
+  /** Retry configuration for database writes */
+  private static readonly RETRY_CONFIG = {
+    maxAttempts: 5,
+    baseDelayMs: 50,
+    maxDelayMs: 2000,
+  };
+
   constructor(
     private config: StorageConfig,
     private log: Logger
   ) {}
+
+  /**
+   * Execute a database operation with exponential backoff retry.
+   * Handles SQLITE_BUSY and other transient errors.
+   * 
+   * @param operation - The async operation to execute
+   * @param operationName - Name for logging purposes
+   * @returns The result of the operation
+   */
+  private async withRetry<T>(
+    operation: () => Promise<T>,
+    operationName: string
+  ): Promise<T> {
+    const { maxAttempts, baseDelayMs, maxDelayMs } = WorkflowStorage.RETRY_CONFIG;
+    let lastError: Error | undefined;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        return await operation();
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+        const errorStr = String(error);
+        
+        // Check if this is a retryable error (SQLITE_BUSY or similar)
+        const isRetryable = 
+          errorStr.includes("SQLITE_BUSY") ||
+          errorStr.includes("database is locked") ||
+          errorStr.includes("cannot start a transaction within a transaction");
+
+        if (!isRetryable || attempt === maxAttempts) {
+          throw lastError;
+        }
+
+        // Calculate delay with exponential backoff and jitter
+        const exponentialDelay = baseDelayMs * (2 ** (attempt - 1));
+        const jitter = Math.random() * baseDelayMs;
+        const delay = Math.min(exponentialDelay + jitter, maxDelayMs);
+
+        this.log.debug(
+          `${operationName} failed (attempt ${attempt}/${maxAttempts}): ${errorStr}. Retrying in ${Math.round(delay)}ms...`
+        );
+
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+
+    // This should never be reached, but TypeScript needs it
+    throw lastError ?? new Error(`${operationName} failed after ${maxAttempts} attempts`);
+  }
 
   /**
    * Register secret input keys for a workflow.
@@ -157,6 +213,10 @@ export class WorkflowStorage {
         url: `file:${dbPath}`,
       });
 
+      // Enable WAL mode for better concurrency handling
+      // WAL allows readers and writers to operate concurrently without blocking
+      await this.enableWALMode();
+
       // Create custom table for our workflow runs
       await this.createRunsTable();
 
@@ -165,6 +225,24 @@ export class WorkflowStorage {
     } catch (error) {
       this.log.error(`Failed to initialize storage: ${error}`);
       throw error;
+    }
+  }
+
+  /**
+   * Enable Write-Ahead Logging (WAL) mode for better concurrency.
+   * WAL mode reduces SQLITE_BUSY errors by allowing concurrent reads during writes.
+   */
+  private async enableWALMode(): Promise<void> {
+    if (!this.store) return;
+
+    try {
+      await this.store.executeSQL("PRAGMA journal_mode = WAL;");
+      // Increase busy timeout to 5 seconds before returning SQLITE_BUSY
+      await this.store.executeSQL("PRAGMA busy_timeout = 5000;");
+      this.log.debug("WAL mode enabled for SQLite database");
+    } catch (error) {
+      // WAL mode might not be supported in some configurations
+      this.log.debug(`WAL mode setup note: ${error}`);
     }
   }
 
@@ -255,31 +333,36 @@ export class WorkflowStorage {
       error: run.error,
     };
 
-    try {
-      await this.store.insert({
-        tableName: "opencode_workflow_runs" as Parameters<typeof this.store.insert>[0]["tableName"],
-        record: {
-          run_id: serialized.runId,
-          workflow_id: serialized.workflowId,
-          status: serialized.status,
-          inputs: serialized.inputs,
-          step_results: serialized.stepResults,
-          current_step_id: serialized.currentStepId ?? null,
-          suspended_data: serialized.suspendedData ?? null,
-          started_at: serialized.startedAt,
-          completed_at: serialized.completedAt ?? null,
-          error: serialized.error ?? null,
-        },
-      });
-      this.log.debug(`Saved run: ${run.runId}`);
-    } catch (error) {
-      // If insert fails (duplicate), try update
-      if (String(error).includes("UNIQUE constraint")) {
-        await this.updateRun(run);
-      } else {
-        throw error;
+    const store = this.store;
+    
+    // Use retry wrapper to handle SQLITE_BUSY errors
+    await this.withRetry(async () => {
+      try {
+        await store.insert({
+          tableName: "opencode_workflow_runs" as Parameters<typeof store.insert>[0]["tableName"],
+          record: {
+            run_id: serialized.runId,
+            workflow_id: serialized.workflowId,
+            status: serialized.status,
+            inputs: serialized.inputs,
+            step_results: serialized.stepResults,
+            current_step_id: serialized.currentStepId ?? null,
+            suspended_data: serialized.suspendedData ?? null,
+            started_at: serialized.startedAt,
+            completed_at: serialized.completedAt ?? null,
+            error: serialized.error ?? null,
+          },
+        });
+        this.log.debug(`Saved run: ${run.runId}`);
+      } catch (error) {
+        // If insert fails (duplicate), try update
+        if (String(error).includes("UNIQUE constraint")) {
+          await this.updateRun(run);
+        } else {
+          throw error;
+        }
       }
-    }
+    }, `saveRun(${run.runId})`);
   }
 
   /**
@@ -314,31 +397,36 @@ export class WorkflowStorage {
       error: run.error,
     };
 
-    await this.store.executeSQL(
-      `UPDATE opencode_workflow_runs SET
-        workflow_id = ?,
-        status = ?,
-        inputs = ?,
-        step_results = ?,
-        current_step_id = ?,
-        suspended_data = ?,
-        started_at = ?,
-        completed_at = ?,
-        error = ?
-      WHERE run_id = ?`,
-      [
-        serialized.workflowId,
-        serialized.status,
-        serialized.inputs,
-        serialized.stepResults,
-        serialized.currentStepId ?? null,
-        serialized.suspendedData ?? null,
-        serialized.startedAt,
-        serialized.completedAt ?? null,
-        serialized.error ?? null,
-        serialized.runId,
-      ]
-    );
+    const store = this.store;
+    
+    // Use retry wrapper to handle SQLITE_BUSY errors
+    await this.withRetry(async () => {
+      await store.executeSQL(
+        `UPDATE opencode_workflow_runs SET
+          workflow_id = ?,
+          status = ?,
+          inputs = ?,
+          step_results = ?,
+          current_step_id = ?,
+          suspended_data = ?,
+          started_at = ?,
+          completed_at = ?,
+          error = ?
+        WHERE run_id = ?`,
+        [
+          serialized.workflowId,
+          serialized.status,
+          serialized.inputs,
+          serialized.stepResults,
+          serialized.currentStepId ?? null,
+          serialized.suspendedData ?? null,
+          serialized.startedAt,
+          serialized.completedAt ?? null,
+          serialized.error ?? null,
+          serialized.runId,
+        ]
+      );
+    }, `updateRun(${run.runId})`);
   }
 
   /**

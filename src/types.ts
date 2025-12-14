@@ -14,12 +14,12 @@ export class MissingInputsError extends Error {
   /** Array of missing input names */
   readonly missingInputs: string[];
   /** The workflow's full input schema */
-  readonly inputSchema: Record<string, "string" | "number" | "boolean">;
+  readonly inputSchema: Record<string, InputTypeName>;
 
   constructor(
     workflowId: string,
     missingInputs: string[],
-    inputSchema: Record<string, "string" | "number" | "boolean">
+    inputSchema: Record<string, InputTypeName>
   ) {
     const inputList = missingInputs.map(name => `${name} (${inputSchema[name]})`).join(", ");
     super(`Missing required input(s) for workflow '${workflowId}': ${inputList}`);
@@ -43,8 +43,11 @@ export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue
 /** JSON-serializable object */
 export type JsonObject = { [key: string]: JsonValue };
 
-/** Input parameter value types */
-export type InputValue = string | number | boolean;
+/** Input parameter value types - now includes complex types */
+export type InputValue = string | number | boolean | JsonValue[] | JsonObject;
+
+/** Input type name as specified in workflow definition */
+export type InputTypeName = "string" | "number" | "boolean" | "object" | "array";
 
 /** Input parameters record */
 export type WorkflowInputs = Record<string, InputValue>;
@@ -76,7 +79,7 @@ export const DEFAULT_CONFIG: Required<WorkflowPluginConfig> = {
 // =============================================================================
 
 /** Step types supported by the workflow engine */
-export type StepType = "shell" | "tool" | "agent" | "suspend" | "wait" | "http" | "file" | "iterator";
+export type StepType = "shell" | "tool" | "agent" | "suspend" | "wait" | "http" | "file" | "iterator" | "eval";
 
 /** HTTP methods supported by the HTTP step */
 export type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS";
@@ -112,6 +115,18 @@ export interface ShellStepDefinition extends BaseStepDefinition {
   env?: Record<string, string>;
   /** Whether to fail the workflow if command exits non-zero */
   failOnError?: boolean;
+  /** 
+   * Safe mode: When true, bypasses the shell and runs the command directly using spawn.
+   * This prevents shell injection attacks but disables shell features (pipes, redirects, etc.).
+   * Requires 'args' to be specified as an array.
+   */
+  safe?: boolean;
+  /**
+   * Command arguments as an array. Required when safe=true.
+   * Each argument is passed directly to the process without shell interpretation.
+   * Supports interpolation (e.g., ["--file", "{{inputs.filename}}"]).
+   */
+  args?: string[];
 }
 
 /** Opencode tool invocation step */
@@ -188,14 +203,76 @@ export type InnerStepDefinition =
 
 /**
  * Iterator step for batch processing.
- * Loops over an array and executes a sub-step for each item.
+ * Loops over an array and executes a sub-step (or sequence of steps) for each item.
  */
 export interface IteratorStepDefinition extends BaseStepDefinition {
   type: "iterator";
   /** Interpolation string resolving to an array (e.g., "{{steps.find-files.result}}") */
   items: string;
-  /** The step definition to run for each item. The current item is available as {{inputs.item}} and index as {{inputs.index}}. The id is optional and will be auto-generated if not provided. */
-  runStep: InnerStepDefinition | (Omit<InnerStepDefinition, "id"> & { id?: string });
+  /** 
+   * The step definition to run for each item. The current item is available as {{inputs.item}} 
+   * and index as {{inputs.index}}. The id is optional and will be auto-generated if not provided.
+   * Use this for a single action per item.
+   */
+  runStep?: InnerStepDefinition | (Omit<InnerStepDefinition, "id"> & { id?: string });
+  /**
+   * Array of step definitions to run sequentially for each item. Use this when you need to
+   * run multiple actions per item (e.g., "clone -> build -> test" for each repo).
+   * Each step can reference outputs from previous steps in the sequence via {{steps.stepId.property}}.
+   * Mutually exclusive with runStep - provide one or the other, not both.
+   */
+  runSteps?: Array<InnerStepDefinition | (Omit<InnerStepDefinition, "id"> & { id?: string })>;
+}
+
+/**
+ * Eval step for dynamic workflow generation and JavaScript/TypeScript execution.
+ * 
+ * The script has access to a sandboxed context with:
+ * - `inputs`: Workflow inputs
+ * - `steps`: Previous step outputs
+ * - `env`: Environment variables (read-only)
+ * 
+ * The script can either:
+ * 1. Return a value directly (stored in `result`)
+ * 2. Return a workflow definition (executed as a sub-workflow)
+ * 
+ * This enables "Agentic Planning" where an agent can decide how to solve a problem
+ * and generate the workflow dynamically at runtime.
+ */
+export interface EvalStepDefinition extends BaseStepDefinition {
+  type: "eval";
+  /** 
+   * JavaScript code to execute in a sandboxed context.
+   * The script should return either a value or a workflow definition object.
+   * 
+   * Available in context:
+   * - `inputs` - Workflow inputs object
+   * - `steps` - Previous step outputs object
+   * - `env` - Environment variables (read-only)
+   * 
+   * Example returning a value:
+   * ```js
+   * const total = inputs.items.length;
+   * return { processed: total, status: 'complete' };
+   * ```
+   * 
+   * Example returning a dynamic workflow:
+   * ```js
+   * return {
+   *   workflow: {
+   *     id: 'dynamic-workflow',
+   *     steps: inputs.tasks.map((task, i) => ({
+   *       id: `task-${i}`,
+   *       type: 'shell',
+   *       command: task.command
+   *     }))
+   *   }
+   * };
+   * ```
+   */
+  script: string;
+  /** Timeout for script execution in milliseconds (default: 30000) */
+  scriptTimeout?: number;
 }
 
 /** Union of all step definition types */
@@ -207,7 +284,8 @@ export type StepDefinition =
   | WaitStepDefinition
   | HttpStepDefinition
   | FileStepDefinition
-  | IteratorStepDefinition;
+  | IteratorStepDefinition
+  | EvalStepDefinition;
 
 /** Trigger configuration for automatic workflow execution */
 export interface WorkflowTrigger {
@@ -227,8 +305,11 @@ export interface WorkflowDefinition {
   description?: string;
   /** Version of the workflow definition */
   version?: string;
-  /** Input parameters schema - maps param name to type name */
-  inputs?: Record<string, "string" | "number" | "boolean">;
+  /** 
+   * Input parameters schema - maps param name to type name.
+   * Supports primitive types (string, number, boolean) and complex types (object, array).
+   */
+  inputs?: Record<string, InputTypeName>;
   /** 
    * List of input names that contain sensitive data (e.g., passwords, API keys).
    * These values will be masked in logs (shown as ***) and encrypted in storage.
@@ -241,6 +322,19 @@ export interface WorkflowDefinition {
   tags?: string[];
   /** Trigger configuration for automatic workflow execution */
   trigger?: WorkflowTrigger;
+  /**
+   * Steps to execute when the workflow fails.
+   * These steps run after a step throws an error, before the finally block.
+   * Useful for sending failure notifications, cleaning up partial state, etc.
+   * The error is available as {{error.message}} and {{error.stepId}}.
+   */
+  onFailure?: StepDefinition[];
+  /**
+   * Steps to execute after the workflow completes, regardless of success or failure.
+   * These steps always run (similar to try/finally in programming languages).
+   * Useful for cleanup tasks like releasing locks, deleting temp files, etc.
+   */
+  finally?: StepDefinition[];
 }
 
 // =============================================================================
@@ -321,6 +415,17 @@ export interface IteratorStepOutput {
   skipped?: boolean;
 }
 
+/** Eval step output */
+export interface EvalStepOutput {
+  /** Direct result value (if not generating a workflow) */
+  result?: JsonValue;
+  /** Generated workflow definition (if any) to execute dynamically */
+  workflow?: WorkflowDefinition;
+  /** If a sub-workflow was executed, its outputs are stored here */
+  subWorkflowOutputs?: Record<string, StepOutput>;
+  skipped?: boolean;
+}
+
 /** Union of all step output types */
 export type StepOutput = 
   | ShellStepOutput 
@@ -330,7 +435,8 @@ export type StepOutput =
   | WaitStepOutput
   | HttpStepOutput
   | FileStepOutput
-  | IteratorStepOutput;
+  | IteratorStepOutput
+  | EvalStepOutput;
 
 /** Step execution result */
 export interface StepResult {
@@ -415,10 +521,41 @@ export type ShellExecutor = (
 
 /** Logger interface */
 export interface Logger {
-  info: (message: string) => void;
-  warn: (message: string) => void;
-  error: (message: string) => void;
-  debug: (message: string) => void;
+  info: (message: string, context?: LogContext) => void;
+  warn: (message: string, context?: LogContext) => void;
+  error: (message: string, context?: LogContext) => void;
+  debug: (message: string, context?: LogContext) => void;
+}
+
+/** Structured log entry for observability */
+export interface StructuredLogEntry {
+  timestamp: string;
+  level: "debug" | "info" | "warn" | "error";
+  message: string;
+  workflowId?: string;
+  runId?: string;
+  stepId?: string;
+  durationMs?: number;
+  metadata?: Record<string, JsonValue>;
+}
+
+/** Log context for structured logging */
+export interface LogContext {
+  workflowId?: string;
+  runId?: string;
+  stepId?: string;
+  durationMs?: number;
+  metadata?: Record<string, JsonValue>;
+}
+
+/** Logger configuration options */
+export interface LoggerOptions {
+  /** Enable verbose debug logging */
+  verbose?: boolean;
+  /** Output format: 'text' for human-readable, 'json' for structured JSON logs */
+  format?: "text" | "json";
+  /** Custom output handler (defaults to console) */
+  output?: (entry: StructuredLogEntry) => void;
 }
 
 // =============================================================================
@@ -439,7 +576,7 @@ export const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
 
 export const BaseStepSchema = z.object({
   id: z.string().min(1),
-  type: z.enum(["shell", "tool", "agent", "suspend", "wait", "http", "file", "iterator"]),
+  type: z.enum(["shell", "tool", "agent", "suspend", "wait", "http", "file", "iterator", "eval"]),
   description: z.string().optional(),
   after: z.array(z.string()).optional(),
   condition: z.string().optional(),
@@ -456,6 +593,8 @@ export const ShellStepSchema = BaseStepSchema.extend({
   cwd: z.string().optional(),
   env: z.record(z.string()).optional(),
   failOnError: z.boolean().optional().default(true),
+  safe: z.boolean().optional(),
+  args: z.array(z.string()).optional(),
 });
 
 export const ToolStepSchema = BaseStepSchema.extend({
@@ -519,8 +658,33 @@ const InnerStepSchema = z.object({
 export const IteratorStepSchema = BaseStepSchema.extend({
   type: z.literal("iterator"),
   items: z.string().min(1),
-  runStep: InnerStepSchema,
+  /** Single step to run for each item (mutually exclusive with runSteps) */
+  runStep: InnerStepSchema.optional(),
+  /** Array of steps to run sequentially for each item (mutually exclusive with runStep) */
+  runSteps: z.array(InnerStepSchema).optional(),
 });
+
+export const EvalStepSchema = BaseStepSchema.extend({
+  type: z.literal("eval"),
+  script: z.string().min(1),
+  scriptTimeout: z.number().positive().optional(),
+});
+
+/**
+ * Validates that an iterator step has exactly one of runStep or runSteps.
+ * Call this after schema validation to enforce mutual exclusivity.
+ */
+export function validateIteratorStep(step: z.infer<typeof IteratorStepSchema>): void {
+  const hasRunStep = step.runStep !== undefined;
+  const hasRunSteps = step.runSteps !== undefined && step.runSteps.length > 0;
+  
+  if (!hasRunStep && !hasRunSteps) {
+    throw new Error(`Iterator step '${step.id}' must have either 'runStep' or 'runSteps'`);
+  }
+  if (hasRunStep && hasRunSteps) {
+    throw new Error(`Iterator step '${step.id}' cannot have both 'runStep' and 'runSteps' - use one or the other`);
+  }
+}
 
 export const StepSchema = z.discriminatedUnion("type", [
   ShellStepSchema,
@@ -531,6 +695,7 @@ export const StepSchema = z.discriminatedUnion("type", [
   HttpStepSchema,
   FileStepSchema,
   IteratorStepSchema,
+  EvalStepSchema,
 ]);
 
 export const WorkflowTriggerSchema = z.object({
@@ -539,17 +704,24 @@ export const WorkflowTriggerSchema = z.object({
   pattern: z.string().optional(),
 });
 
+/** Zod schema for input type names */
+export const InputTypeNameSchema = z.enum(["string", "number", "boolean", "object", "array"]);
+
 export const WorkflowDefinitionSchema = z.object({
   $schema: z.string().optional(),
   id: z.string().min(1),
   name: z.string().optional(),
   description: z.string().optional(),
   version: z.string().optional(),
-  inputs: z.record(z.enum(["string", "number", "boolean"])).optional(),
+  inputs: z.record(InputTypeNameSchema).optional(),
   secrets: z.array(z.string()).optional(),
   steps: z.array(StepSchema).min(1),
   tags: z.array(z.string()).optional(),
   trigger: WorkflowTriggerSchema.optional(),
+  /** Steps to execute when the workflow fails (before finally) */
+  onFailure: z.array(StepSchema).optional(),
+  /** Steps to execute after workflow completes (always runs) */
+  finally: z.array(StepSchema).optional(),
 });
 
 // =============================================================================

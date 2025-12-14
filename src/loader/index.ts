@@ -1,13 +1,27 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join, resolve, extname, basename } from "node:path";
 import { homedir } from "node:os";
+import { createJiti } from "jiti";
 import stripJsonComments from "strip-json-comments";
+import yaml from "js-yaml";
 import {
   type WorkflowDefinition,
   WorkflowDefinitionSchema,
   DEFAULT_CONFIG,
   type Logger,
+  type LoggerOptions,
+  type LogContext,
+  type StructuredLogEntry,
 } from "../types.js";
+
+// Create a jiti instance for loading TypeScript/JavaScript workflow files
+// This allows importing .ts files without a build step
+const jiti = createJiti(import.meta.url, {
+  // Use native ESM resolution
+  interopDefault: true,
+  // Enable TypeScript support
+  extensions: [".ts", ".js", ".mts", ".cts", ".mjs", ".cjs"],
+});
 
 /**
  * Expands ~ to home directory in paths
@@ -58,11 +72,10 @@ async function scanDirectory(
       const ext = extname(entry.name).toLowerCase();
       const filePath = join(absolutePath, entry.name);
 
-      // Only process JSON files for now
-      // TypeScript workflow files would require dynamic import
-      if (ext === ".json" || ext === ".jsonc") {
+      // Support JSON, JSONC, YAML, and YML
+      if ([".json", ".jsonc", ".yaml", ".yml"].includes(ext)) {
         try {
-          const workflow = await loadJsonWorkflow(filePath, log);
+          const workflow = await loadDataWorkflow(filePath, log);
           if (workflow) {
             workflows.push(workflow);
             log.info(`Loaded workflow: ${workflow.id} from ${entry.name}`);
@@ -70,12 +83,16 @@ async function scanDirectory(
         } catch (error) {
           log.error(`Failed to load workflow from ${entry.name}: ${error}`);
         }
-      } else if (ext === ".ts" || ext === ".js") {
-        // TypeScript/JavaScript workflow files would need bundling/transpilation
-        // For now, log a warning
-        log.warn(
-          `TypeScript/JS workflow files not yet supported: ${entry.name}`
-        );
+      } else if (ext === ".ts" || ext === ".js" || ext === ".mts" || ext === ".mjs") {
+        try {
+          const workflow = await loadTsWorkflow(filePath, log);
+          if (workflow) {
+            workflows.push(workflow);
+            log.info(`Loaded TypeScript workflow: ${workflow.id} from ${entry.name}`);
+          }
+        } catch (error) {
+          log.error(`Failed to load TypeScript workflow from ${entry.name}: ${error}`);
+        }
       }
     }
   } catch (error) {
@@ -86,21 +103,29 @@ async function scanDirectory(
 }
 
 /**
- * Loads and validates a JSON workflow definition
+ * Loads and validates a workflow definition from JSON, JSONC, or YAML
  */
-async function loadJsonWorkflow(
+async function loadDataWorkflow(
   filePath: string,
   log: Logger
 ): Promise<WorkflowDefinition | null> {
   try {
     const content = await readFile(filePath, "utf-8");
+    const ext = extname(filePath).toLowerCase();
     
-    // Strip comments before parsing to support JSONC
-    const cleanJson = stripJsonComments(content);
-    const json = JSON.parse(cleanJson);
+    let parsed: unknown;
+
+    if (ext === ".yaml" || ext === ".yml") {
+      // Parse YAML
+      parsed = yaml.load(content);
+    } else {
+      // Parse JSON/JSONC - strip comments before parsing
+      const cleanJson = stripJsonComments(content);
+      parsed = JSON.parse(cleanJson);
+    }
 
     // Validate against schema
-    const result = WorkflowDefinitionSchema.safeParse(json);
+    const result = WorkflowDefinitionSchema.safeParse(parsed);
 
     if (!result.success) {
       log.error(`Invalid workflow schema in ${filePath}:`);
@@ -142,9 +167,112 @@ async function loadJsonWorkflow(
   } catch (error) {
     if (error instanceof SyntaxError) {
       log.error(`Invalid JSON in ${filePath}: ${error.message}`);
+    } else if ((error as { name?: string }).name === "YAMLException") {
+      log.error(`Invalid YAML in ${filePath}: ${(error as Error).message}`);
     } else {
       throw error;
     }
+    return null;
+  }
+}
+
+/**
+ * Loads and validates a TypeScript or JavaScript workflow definition.
+ * 
+ * The file can export:
+ * - A default export of a WorkflowDefinition object
+ * - A default export of a function that returns a WorkflowDefinition (sync or async)
+ * 
+ * @example
+ * // Type-safe TypeScript workflow
+ * import type { WorkflowDefinition } from "opencode-workflows";
+ * 
+ * const workflow: WorkflowDefinition = {
+ *   id: "my-workflow",
+ *   steps: [{ id: "step1", type: "shell", command: "echo hello" }]
+ * };
+ * 
+ * export default workflow;
+ * 
+ * @example
+ * // Dynamic workflow generation
+ * import type { WorkflowDefinition } from "opencode-workflows";
+ * 
+ * export default async function(): Promise<WorkflowDefinition> {
+ *   const config = await loadConfig();
+ *   return {
+ *     id: "dynamic-workflow",
+ *     steps: config.tasks.map(task => ({
+ *       id: task.id,
+ *       type: "shell",
+ *       command: task.command,
+ *     })),
+ *   };
+ * }
+ */
+async function loadTsWorkflow(
+  filePath: string,
+  log: Logger
+): Promise<WorkflowDefinition | null> {
+  try {
+    // Use jiti to import the TypeScript/JavaScript file
+    const module = await jiti.import(filePath);
+    
+    // Get the default export (handles both ESM and CJS)
+    const exported = (module as { default?: unknown }).default ?? module;
+    
+    let workflow: unknown;
+    
+    // If the export is a function, call it to get the workflow definition
+    if (typeof exported === "function") {
+      log.debug(`Workflow file exports a function, executing it: ${filePath}`);
+      workflow = await exported();
+    } else {
+      workflow = exported;
+    }
+    
+    // Validate against schema
+    const result = WorkflowDefinitionSchema.safeParse(workflow);
+    
+    if (!result.success) {
+      log.error(`Invalid workflow schema in ${filePath}:`);
+      for (const issue of result.error.issues) {
+        log.error(`  - ${issue.path.join(".")}: ${issue.message}`);
+      }
+      return null;
+    }
+    
+    const validatedWorkflow = result.data;
+    
+    // Validate step dependencies
+    const stepIds = new Set(validatedWorkflow.steps.map((s) => s.id));
+    for (const step of validatedWorkflow.steps) {
+      if (step.after) {
+        for (const dep of step.after) {
+          if (!stepIds.has(dep)) {
+            log.error(
+              `Step "${step.id}" depends on unknown step "${dep}" in ${filePath}`
+            );
+            return null;
+          }
+        }
+      }
+    }
+    
+    // Check for circular dependencies
+    if (hasCircularDependencies(validatedWorkflow.steps)) {
+      log.error(`Circular dependencies detected in ${filePath}`);
+      return null;
+    }
+    
+    // Use filename as ID if not provided
+    if (!validatedWorkflow.id) {
+      validatedWorkflow.id = basename(filePath, extname(filePath));
+    }
+    
+    return validatedWorkflow as WorkflowDefinition;
+  } catch (error) {
+    log.error(`Failed to load TypeScript workflow ${filePath}: ${error}`);
     return null;
   }
 }
@@ -298,15 +426,82 @@ export async function loadWorkflows(
 }
 
 /**
- * Creates a simple console logger
+ * Creates a structured logger with support for JSON or text output.
+ * 
+ * @param options - Logger configuration options
+ * @returns A Logger instance
+ * 
+ * @example
+ * // Simple text logger (default)
+ * const log = createLogger({ verbose: true });
+ * 
+ * @example
+ * // JSON structured logging for production
+ * const log = createLogger({ format: 'json' });
+ * 
+ * @example
+ * // Custom output handler
+ * const log = createLogger({
+ *   output: (entry) => sendToLogAggregator(entry)
+ * });
  */
-export function createLogger(verbose = false): Logger {
+export function createLogger(options: LoggerOptions | boolean = {}): Logger {
+  // Handle legacy boolean parameter for backwards compatibility
+  const opts: LoggerOptions = typeof options === 'boolean' 
+    ? { verbose: options } 
+    : options;
+  
+  const { verbose = false, format = "text", output } = opts;
+
+  /**
+   * Emit a log entry using the configured format and output
+   */
+  const emit = (
+    level: StructuredLogEntry["level"],
+    message: string,
+    context?: LogContext
+  ): void => {
+    const entry: StructuredLogEntry = {
+      timestamp: new Date().toISOString(),
+      level,
+      message,
+      ...context,
+    };
+
+    // If custom output handler is provided, use it
+    if (output) {
+      output(entry);
+      return;
+    }
+
+    // Format and output based on configuration
+    if (format === "json") {
+      // Structured JSON output for log aggregation/parsing
+      const logFn = level === "error" ? console.error : level === "warn" ? console.warn : console.log;
+      logFn(JSON.stringify(entry));
+    } else {
+      // Human-readable text format
+      const contextParts = [
+        entry.workflowId && `workflow=${entry.workflowId}`,
+        entry.runId && `run=${entry.runId.slice(0, 8)}`,
+        entry.stepId && `step=${entry.stepId}`,
+        entry.durationMs !== undefined && `duration=${entry.durationMs}ms`,
+      ].filter(Boolean);
+
+      const contextStr = contextParts.length > 0 ? ` [${contextParts.join(" ")}]` : "";
+      const prefix = `[workflow] [${level.toUpperCase()}]`;
+      
+      const logFn = level === "error" ? console.error : level === "warn" ? console.warn : console.log;
+      logFn(`${prefix}${contextStr} ${message}`);
+    }
+  };
+
   return {
-    info: (msg) => console.log(`[workflow] ${msg}`),
-    warn: (msg) => console.warn(`[workflow] ${msg}`),
-    error: (msg) => console.error(`[workflow] ${msg}`),
-    debug: (msg) => {
-      if (verbose) console.log(`[workflow:debug] ${msg}`);
+    info: (msg, ctx) => emit("info", msg, ctx),
+    warn: (msg, ctx) => emit("warn", msg, ctx),
+    error: (msg, ctx) => emit("error", msg, ctx),
+    debug: (msg, ctx) => {
+      if (verbose) emit("debug", msg, ctx);
     },
   };
 }

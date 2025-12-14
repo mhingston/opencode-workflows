@@ -1,0 +1,59 @@
+$schema: https://raw.githubusercontent.com/mark-hingston/opencode-workflows/main/schemas/workflow.schema.json
+id: conditional-deploy-yaml
+name: Conditional Deployment
+description: Demonstrates conditional step execution based on environment and approval
+version: 1.0.0
+tags:
+  - conditional
+  - deploy
+
+inputs:
+  environment: string
+  skipTests: boolean
+
+steps:
+  - id: run-tests
+    type: shell
+    description: Run test suite (skipped if skipTests=true)
+    command: npm test
+    condition: "{{inputs.skipTests}}"
+    failOnError: true
+
+  - id: build
+    type: shell
+    description: Build the application
+    after: [run-tests]
+    command: npm run build
+
+  - id: deploy-staging
+    type: shell
+    description: Deploy to staging (always runs)
+    after: [build]
+    command: deploy.sh --env staging
+
+  - id: prod-approval
+    type: suspend
+    description: Wait for production approval (only for prod environment)
+    after: [deploy-staging]
+    condition: "{{inputs.environment}}"
+    message: Staging deploy complete. Approve production deployment?
+
+  - id: deploy-prod
+    type: shell
+    description: Deploy to production (only if environment=production)
+    after: [prod-approval]
+    condition: "{{inputs.environment}}"
+    command: deploy.sh --env production
+
+  - id: notify-team
+    type: http
+    description: Send notification (skipped if no webhook URL)
+    after: [deploy-staging, deploy-prod]
+    condition: "{{env.SLACK_WEBHOOK_URL}}"
+    failOnError: false
+    method: POST
+    url: "{{env.SLACK_WEBHOOK_URL}}"
+    headers:
+      Content-Type: application/json
+    body:
+      text: "Deployed to {{inputs.environment}} successfully!"

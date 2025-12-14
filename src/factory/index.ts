@@ -4,6 +4,7 @@ import type {
   WorkflowDefinition,
   StepDefinition,
   OpencodeClient,
+  InputTypeName,
 } from "../types.js";
 import {
   createShellStep,
@@ -13,6 +14,7 @@ import {
   createHttpStep,
   createFileStep,
   createIteratorStep,
+  createEvalStep,
 } from "../adapters/index.js";
 import { topologicalSort } from "../loader/index.js";
 
@@ -28,9 +30,13 @@ export interface WorkflowFactoryResult {
   id: string;
   description?: string;
   /** Input schema for the workflow (maps param name to type) */
-  inputSchema?: Record<string, "string" | "number" | "boolean">;
+  inputSchema?: Record<string, InputTypeName>;
   /** List of input names that are marked as secrets */
   secrets?: string[];
+  /** Steps to execute when the workflow fails (before finally) */
+  onFailureSteps?: StepDefinition[];
+  /** Steps to execute after workflow completes (always runs) */
+  finallySteps?: StepDefinition[];
 }
 
 /**
@@ -46,15 +52,27 @@ function buildInputSchema(
   const shape: Record<string, z.ZodTypeAny> = {};
 
   for (const [key, type] of Object.entries(inputs)) {
-    if (type === "string") {
-      shape[key] = z.string();
-    } else if (type === "number") {
-      shape[key] = z.number();
-    } else if (type === "boolean") {
-      shape[key] = z.boolean();
-    } else {
-      // Default to string for any unrecognized type
-      shape[key] = z.string();
+    switch (type) {
+      case "string":
+        shape[key] = z.string();
+        break;
+      case "number":
+        shape[key] = z.number();
+        break;
+      case "boolean":
+        shape[key] = z.boolean();
+        break;
+      case "object":
+        // Accept any JSON object
+        shape[key] = z.record(z.unknown());
+        break;
+      case "array":
+        // Accept any JSON array
+        shape[key] = z.array(z.unknown());
+        break;
+      default:
+        // Default to unknown for unrecognized types (shouldn't happen with schema validation)
+        shape[key] = z.unknown();
     }
   }
 
@@ -80,6 +98,8 @@ function createMastraStep(def: StepDefinition, client: OpencodeClient): unknown 
       return createFileStep(def);
     case "iterator":
       return createIteratorStep(def, client);
+    case "eval":
+      return createEvalStep(def, client);
     default:
       throw new Error(`Unknown step type: ${(def as StepDefinition).type}`);
   }
@@ -248,6 +268,8 @@ export function createWorkflowFromDefinition(
     description: definition.description,
     inputSchema: definition.inputs,
     secrets: definition.secrets,
+    onFailureSteps: definition.onFailure,
+    finallySteps: definition.finally,
   };
 }
 
@@ -258,6 +280,14 @@ export class WorkflowFactory {
   private compiledWorkflows = new Map<string, WorkflowFactoryResult>();
 
   constructor(private client: OpencodeClient) {}
+
+  /**
+   * Get the OpenCode client instance.
+   * Used by the runner to execute cleanup steps (onFailure, finally).
+   */
+  getClient(): OpencodeClient {
+    return this.client;
+  }
 
   /**
    * Compile a workflow definition into a Mastra workflow

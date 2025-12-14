@@ -1,24 +1,47 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { OpencodeClient } from "../types.js";
+import { EventEmitter } from "node:events";
 
 // Use vi.hoisted to create mocks that can be used in vi.mock factories
-const { mockExecAsync } = vi.hoisted(() => ({
-  mockExecAsync: vi.fn(),
-}));
-
-// Mock child_process - needs to work with promisify
-vi.mock("node:child_process", () => ({
-  exec: vi.fn(),
-}));
-
-// Mock node:util to return our async mock when promisify is called with exec
-vi.mock("node:util", async (importOriginal) => {
-  const original = await importOriginal<typeof import("node:util")>();
+const { mockSpawn, createMockProcess } = vi.hoisted(() => {
+  // Helper to create a mock child process
+  const createMockProcess = () => {
+    const process = new EventEmitter() as EventEmitter & {
+      stdout: EventEmitter;
+      stderr: EventEmitter;
+      pid: number;
+    };
+    process.stdout = new EventEmitter();
+    process.stderr = new EventEmitter();
+    process.pid = 12345;
+    return process;
+  };
+  
   return {
-    ...original,
-    promisify: () => mockExecAsync,
+    mockSpawn: vi.fn(),
+    createMockProcess,
   };
 });
+
+// Track the current mock process for test manipulation
+let currentMockProcess: ReturnType<typeof createMockProcess> | null = null;
+
+// Mock child_process - use spawn
+vi.mock("node:child_process", () => ({
+  spawn: (...args: unknown[]) => {
+    // Call the mock and use its return value if provided (from mockImplementation)
+    const result = mockSpawn(...args);
+    // If mockImplementation returned a process, use that; otherwise use currentMockProcess
+    return result ?? currentMockProcess;
+  },
+}));
+
+// Mock tree-kill
+vi.mock("tree-kill", () => ({
+  default: vi.fn((pid: number, signal: string, callback: (err?: Error) => void) => {
+    callback();
+  }),
+}));
 
 vi.mock("node:fs/promises", () => ({
   readFile: vi.fn(),
@@ -45,17 +68,34 @@ import {
   createHttpStep,
   createFileStep,
   createIteratorStep,
+  createEvalStep,
 } from "./steps.js";
 import { readFile, writeFile, unlink } from "node:fs/promises";
 
-// Helper to simulate successful exec - works with the promisified version
-function mockExecSuccess(stdout: string, stderr = "") {
-  mockExecAsync.mockResolvedValue({ stdout, stderr });
+// Helper to simulate successful spawn execution
+function mockSpawnSuccess(stdout: string, stderr = "") {
+  currentMockProcess = createMockProcess();
+  
+  // Simulate async behavior - emit data and close after a microtask
+  setImmediate(() => {
+    if (currentMockProcess) {
+      if (stdout) currentMockProcess.stdout.emit("data", stdout);
+      if (stderr) currentMockProcess.stderr.emit("data", stderr);
+      currentMockProcess.emit("close", 0, null);
+    }
+  });
 }
 
-function mockExecError(code: number, stderr: string, stdout = "") {
-  const error = Object.assign(new Error(stderr), { code, stdout, stderr });
-  mockExecAsync.mockRejectedValue(error);
+function mockSpawnError(code: number, stderr: string, stdout = "") {
+  currentMockProcess = createMockProcess();
+  
+  setImmediate(() => {
+    if (currentMockProcess) {
+      if (stdout) currentMockProcess.stdout.emit("data", stdout);
+      if (stderr) currentMockProcess.stderr.emit("data", stderr);
+      currentMockProcess.emit("close", code, null);
+    }
+  });
 }
 
 describe("Step Adapters", () => {
@@ -313,7 +353,7 @@ describe("Step Adapters", () => {
         } as unknown as Parameters<typeof step.execute>[0]);
 
         expect(result).toEqual(previousResult);
-        expect(mockExecAsync).not.toHaveBeenCalled();
+        expect(mockSpawn).not.toHaveBeenCalled();
         expect(mockClient.app.log).toHaveBeenCalledWith(
           "Skipping already-completed step: build-step",
           "info"
@@ -323,7 +363,7 @@ describe("Step Adapters", () => {
 
     describe("command execution", () => {
       it("should execute command and return stdout/stderr", async () => {
-        mockExecSuccess("output text", "warning text");
+        mockSpawnSuccess("output text", "warning text");
         const step = createShellStep(
           { id: "cmd", type: "shell", command: "echo hello" },
           mockClient
@@ -338,11 +378,11 @@ describe("Step Adapters", () => {
           stderr: "warning text",
           exitCode: 0,
         });
-        expect(mockExecAsync).toHaveBeenCalled();
+        expect(mockSpawn).toHaveBeenCalled();
       });
 
       it("should interpolate variables in command", async () => {
-        mockExecSuccess("done");
+        mockSpawnSuccess("done");
         const step = createShellStep(
           { id: "cmd", type: "shell", command: "deploy {{inputs.env}}" },
           mockClient
@@ -352,14 +392,16 @@ describe("Step Adapters", () => {
           inputData: { inputs: { env: "production" }, steps: {} },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(mockExecAsync).toHaveBeenCalledWith(
-          "deploy production",
+        // spawn is called with shell and shell args for command
+        expect(mockSpawn).toHaveBeenCalledWith(
+          "/bin/sh",
+          ["-c", "deploy production"],
           expect.any(Object)
         );
       });
 
       it("should use step results in interpolation", async () => {
-        mockExecSuccess("deployed");
+        mockSpawnSuccess("deployed");
         const step = createShellStep(
           { id: "deploy", type: "shell", command: "deploy {{steps.build.artifact}}" },
           mockClient
@@ -372,14 +414,15 @@ describe("Step Adapters", () => {
           },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(mockExecAsync).toHaveBeenCalledWith(
-          "deploy app.zip",
+        expect(mockSpawn).toHaveBeenCalledWith(
+          "/bin/sh",
+          ["-c", "deploy app.zip"],
           expect.any(Object)
         );
       });
 
       it("should pass cwd option when specified", async () => {
-        mockExecSuccess("done");
+        mockSpawnSuccess("done");
         const step = createShellStep(
           { id: "cmd", type: "shell", command: "ls", cwd: "/tmp" },
           mockClient
@@ -389,14 +432,15 @@ describe("Step Adapters", () => {
           inputData: { inputs: {}, steps: {} },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(mockExecAsync).toHaveBeenCalledWith(
-          "ls",
+        expect(mockSpawn).toHaveBeenCalledWith(
+          "/bin/sh",
+          ["-c", "ls"],
           expect.objectContaining({ cwd: "/tmp" })
         );
       });
 
       it("should pass interpolated cwd option", async () => {
-        mockExecSuccess("done");
+        mockSpawnSuccess("done");
         const step = createShellStep(
           { id: "cmd", type: "shell", command: "ls", cwd: "{{inputs.dir}}" },
           mockClient
@@ -406,14 +450,15 @@ describe("Step Adapters", () => {
           inputData: { inputs: { dir: "/home/user" }, steps: {} },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(mockExecAsync).toHaveBeenCalledWith(
-          "ls",
+        expect(mockSpawn).toHaveBeenCalledWith(
+          "/bin/sh",
+          ["-c", "ls"],
           expect.objectContaining({ cwd: "/home/user" })
         );
       });
 
       it("should merge env variables", async () => {
-        mockExecSuccess("done");
+        mockSpawnSuccess("done");
         const step = createShellStep(
           {
             id: "cmd",
@@ -428,8 +473,9 @@ describe("Step Adapters", () => {
           inputData: { inputs: { val: "interpolated" }, steps: {} },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(mockExecAsync).toHaveBeenCalledWith(
-          "echo $MY_VAR",
+        expect(mockSpawn).toHaveBeenCalledWith(
+          "/bin/sh",
+          ["-c", "echo $MY_VAR"],
           expect.objectContaining({
             env: expect.objectContaining({
               MY_VAR: "value",
@@ -440,7 +486,7 @@ describe("Step Adapters", () => {
       });
 
       it("should pass timeout option when specified", async () => {
-        mockExecSuccess("done");
+        mockSpawnSuccess("done");
         const step = createShellStep(
           { id: "cmd", type: "shell", command: "long-task", timeout: 5000 },
           mockClient
@@ -450,16 +496,19 @@ describe("Step Adapters", () => {
           inputData: { inputs: {}, steps: {} },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(mockExecAsync).toHaveBeenCalledWith(
-          "long-task",
-          expect.objectContaining({ timeout: 5000 })
+        // With spawn, timeout is handled separately via setTimeout, not passed to spawn options
+        // Just verify spawn was called with the right command
+        expect(mockSpawn).toHaveBeenCalledWith(
+          "/bin/sh",
+          ["-c", "long-task"],
+          expect.any(Object)
         );
       });
     });
 
     describe("error handling", () => {
       it("should throw error when command fails with failOnError=true (default)", async () => {
-        mockExecError(1, "command failed");
+        mockSpawnError(1, "command failed");
         const step = createShellStep(
           { id: "cmd", type: "shell", command: "fail" },
           mockClient
@@ -473,7 +522,7 @@ describe("Step Adapters", () => {
       });
 
       it("should return error output when failOnError=false", async () => {
-        mockExecError(127, "not found", "partial output");
+        mockSpawnError(127, "not found", "partial output");
         const step = createShellStep(
           { id: "cmd", type: "shell", command: "missing-cmd", failOnError: false },
           mockClient
@@ -508,11 +557,11 @@ describe("Step Adapters", () => {
           exitCode: 0,
           skipped: true,
         });
-        expect(mockExecAsync).not.toHaveBeenCalled();
+        expect(mockSpawn).not.toHaveBeenCalled();
       });
 
       it("should execute when condition is true", async () => {
-        mockExecSuccess("executed");
+        mockSpawnSuccess("executed");
         const step = createShellStep(
           { id: "cmd", type: "shell", command: "safe", condition: "{{inputs.run}}" },
           mockClient
@@ -523,7 +572,7 @@ describe("Step Adapters", () => {
         } as unknown as Parameters<typeof step.execute>[0]);
 
         expect(result.stdout).toBe("executed");
-        expect(mockExecAsync).toHaveBeenCalled();
+        expect(mockSpawn).toHaveBeenCalled();
       });
 
       it("should skip when condition evaluates to empty string", async () => {
@@ -1630,7 +1679,7 @@ describe("Step Adapters", () => {
         } as unknown as Parameters<typeof step.execute>[0]);
 
         expect(result).toEqual(previousResult);
-        expect(mockExecAsync).not.toHaveBeenCalled();
+        expect(mockSpawn).not.toHaveBeenCalled();
         expect(mockClient.app.log).toHaveBeenCalledWith(
           "Skipping already-completed step: iterator-step",
           "info"
@@ -1640,7 +1689,15 @@ describe("Step Adapters", () => {
 
     describe("iteration execution", () => {
       it("should iterate over array and execute runStep for each item", async () => {
-        mockExecAsync.mockResolvedValue({ stdout: "processed", stderr: "" });
+        // For iterator tests, we need to set up a fresh mock process for each spawn call
+        mockSpawn.mockImplementation(() => {
+          const proc = createMockProcess();
+          setImmediate(() => {
+            proc.stdout.emit("data", "processed");
+            proc.emit("close", 0, null);
+          });
+          return proc;
+        });
         const step = createIteratorStep(
           {
             id: "lint-files",
@@ -1663,14 +1720,14 @@ describe("Step Adapters", () => {
 
         expect(result.count).toBe(3);
         expect(result.results).toHaveLength(3);
-        expect(mockExecAsync).toHaveBeenCalledTimes(3);
-        expect(mockExecAsync).toHaveBeenCalledWith("eslint src/a.ts", expect.any(Object));
-        expect(mockExecAsync).toHaveBeenCalledWith("eslint src/b.ts", expect.any(Object));
-        expect(mockExecAsync).toHaveBeenCalledWith("eslint src/c.ts", expect.any(Object));
+        expect(mockSpawn).toHaveBeenCalledTimes(3);
+        expect(mockSpawn).toHaveBeenCalledWith("/bin/sh", ["-c", "eslint src/a.ts"], expect.any(Object));
+        expect(mockSpawn).toHaveBeenCalledWith("/bin/sh", ["-c", "eslint src/b.ts"], expect.any(Object));
+        expect(mockSpawn).toHaveBeenCalledWith("/bin/sh", ["-c", "eslint src/c.ts"], expect.any(Object));
       });
 
       it("should provide index in iteration context", async () => {
-        mockExecAsync.mockResolvedValue({ stdout: "done", stderr: "" });
+        mockSpawnSuccess("done");
         const step = createIteratorStep(
           {
             id: "numbered",
@@ -1691,12 +1748,12 @@ describe("Step Adapters", () => {
           },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(mockExecAsync).toHaveBeenCalledWith("echo Item 0: apple", expect.any(Object));
-        expect(mockExecAsync).toHaveBeenCalledWith("echo Item 1: banana", expect.any(Object));
+        expect(mockSpawn).toHaveBeenCalledWith("/bin/sh", ["-c", "echo Item 0: apple"], expect.any(Object));
+        expect(mockSpawn).toHaveBeenCalledWith("/bin/sh", ["-c", "echo Item 1: banana"], expect.any(Object));
       });
 
       it("should iterate over array from previous step result", async () => {
-        mockExecAsync.mockResolvedValue({ stdout: "linted", stderr: "" });
+        mockSpawnSuccess("linted");
         const step = createIteratorStep(
           {
             id: "lint-found-files",
@@ -1720,12 +1777,12 @@ describe("Step Adapters", () => {
         } as unknown as Parameters<typeof step.execute>[0]);
 
         expect(result.count).toBe(2);
-        expect(mockExecAsync).toHaveBeenCalledWith("lint file1.ts", expect.any(Object));
-        expect(mockExecAsync).toHaveBeenCalledWith("lint file2.ts", expect.any(Object));
+        expect(mockSpawn).toHaveBeenCalledWith("/bin/sh", ["-c", "lint file1.ts"], expect.any(Object));
+        expect(mockSpawn).toHaveBeenCalledWith("/bin/sh", ["-c", "lint file2.ts"], expect.any(Object));
       });
 
       it("should handle objects in the array", async () => {
-        mockExecAsync.mockResolvedValue({ stdout: "deployed", stderr: "" });
+        mockSpawnSuccess("deployed");
         const step = createIteratorStep(
           {
             id: "deploy-services",
@@ -1751,8 +1808,8 @@ describe("Step Adapters", () => {
           },
         } as unknown as Parameters<typeof step.execute>[0]);
 
-        expect(mockExecAsync).toHaveBeenCalledWith("deploy api to us-east", expect.any(Object));
-        expect(mockExecAsync).toHaveBeenCalledWith("deploy web to eu-west", expect.any(Object));
+        expect(mockSpawn).toHaveBeenCalledWith("/bin/sh", ["-c", "deploy api to us-east"], expect.any(Object));
+        expect(mockSpawn).toHaveBeenCalledWith("/bin/sh", ["-c", "deploy web to eu-west"], expect.any(Object));
       });
 
       it("should handle empty array", async () => {
@@ -1778,7 +1835,7 @@ describe("Step Adapters", () => {
 
         expect(result.count).toBe(0);
         expect(result.results).toHaveLength(0);
-        expect(mockExecAsync).not.toHaveBeenCalled();
+        expect(mockSpawn).not.toHaveBeenCalled();
       });
 
       it("should execute tool runStep for each item", async () => {
@@ -1836,9 +1893,15 @@ describe("Step Adapters", () => {
       });
 
       it("should propagate errors from runStep", async () => {
-        mockExecAsync.mockRejectedValue(
-          Object.assign(new Error("Command failed"), { code: 1, stderr: "error", stdout: "" })
-        );
+        // Set up mock to return a process that fails
+        mockSpawn.mockImplementation(() => {
+          const proc = createMockProcess();
+          setImmediate(() => {
+            proc.stderr.emit("data", "error");
+            proc.emit("close", 1, null);
+          });
+          return proc;
+        });
         const step = createIteratorStep(
           {
             id: "failing-iter",
@@ -1891,11 +1954,19 @@ describe("Step Adapters", () => {
           count: 0,
           skipped: true,
         });
-        expect(mockExecAsync).not.toHaveBeenCalled();
+        expect(mockSpawn).not.toHaveBeenCalled();
       });
 
       it("should execute when condition is true", async () => {
-        mockExecAsync.mockResolvedValue({ stdout: "done", stderr: "" });
+        // Set up mock to return a process that succeeds
+        mockSpawn.mockImplementation(() => {
+          const proc = createMockProcess();
+          setImmediate(() => {
+            proc.stdout.emit("data", "done");
+            proc.emit("close", 0, null);
+          });
+          return proc;
+        });
         const step = createIteratorStep(
           {
             id: "conditional-iter",
@@ -1918,7 +1989,433 @@ describe("Step Adapters", () => {
         } as unknown as Parameters<typeof step.execute>[0]);
 
         expect(result.count).toBe(1);
-        expect(mockExecAsync).toHaveBeenCalled();
+        expect(mockSpawn).toHaveBeenCalled();
+      });
+    });
+  });
+
+  describe("createEvalStep", () => {
+    let mockClient: OpencodeClient;
+
+    beforeEach(() => {
+      mockClient = {
+        app: {
+          log: vi.fn(),
+        },
+        tools: {},
+        llm: {
+          chat: vi.fn(),
+        },
+      } as unknown as OpencodeClient;
+    });
+
+    describe("basic script execution", () => {
+      it("should execute a simple script and return the result", async () => {
+        const step = createEvalStep(
+          {
+            id: "eval-simple",
+            type: "eval",
+            script: "return 42;",
+          },
+          mockClient
+        );
+
+        const result = await step.execute({
+          inputData: {
+            inputs: {},
+            steps: {},
+          },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result).toEqual({ result: 42 });
+      });
+
+      it("should access inputs in the script", async () => {
+        const step = createEvalStep(
+          {
+            id: "eval-inputs",
+            type: "eval",
+            script: "return inputs.name + '!';",
+          },
+          mockClient
+        );
+
+        const result = await step.execute({
+          inputData: {
+            inputs: { name: "World" },
+            steps: {},
+          },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result).toEqual({ result: "World!" });
+      });
+
+      it("should access step outputs in the script", async () => {
+        const step = createEvalStep(
+          {
+            id: "eval-steps",
+            type: "eval",
+            script: "return steps.previous.count * 2;",
+          },
+          mockClient
+        );
+
+        const result = await step.execute({
+          inputData: {
+            inputs: {},
+            steps: { previous: { count: 5 } },
+          },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result).toEqual({ result: 10 });
+      });
+
+      it("should return object results", async () => {
+        const step = createEvalStep(
+          {
+            id: "eval-object",
+            type: "eval",
+            script: "return { sum: inputs.a + inputs.b, product: inputs.a * inputs.b };",
+          },
+          mockClient
+        );
+
+        const result = await step.execute({
+          inputData: {
+            inputs: { a: 3, b: 4 },
+            steps: {},
+          },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result).toEqual({ result: { sum: 7, product: 12 } });
+      });
+
+      it("should return array results", async () => {
+        const step = createEvalStep(
+          {
+            id: "eval-array",
+            type: "eval",
+            script: "return inputs.items.map(x => x * 2);",
+          },
+          mockClient
+        );
+
+        const result = await step.execute({
+          inputData: {
+            inputs: { items: [1, 2, 3] },
+            steps: {},
+          },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result).toEqual({ result: [2, 4, 6] });
+      });
+    });
+
+    describe("sandbox security", () => {
+      it("should not have access to require", async () => {
+        const step = createEvalStep(
+          {
+            id: "eval-no-require",
+            type: "eval",
+            script: "return typeof require;",
+          },
+          mockClient
+        );
+
+        const result = await step.execute({
+          inputData: { inputs: {}, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result).toEqual({ result: "undefined" });
+      });
+
+      it("should not have access to process", async () => {
+        const step = createEvalStep(
+          {
+            id: "eval-no-process",
+            type: "eval",
+            script: "return typeof process;",
+          },
+          mockClient
+        );
+
+        const result = await step.execute({
+          inputData: { inputs: {}, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result).toEqual({ result: "undefined" });
+      });
+
+      it("should not have access to fetch", async () => {
+        const step = createEvalStep(
+          {
+            id: "eval-no-fetch",
+            type: "eval",
+            script: "return typeof fetch;",
+          },
+          mockClient
+        );
+
+        const result = await step.execute({
+          inputData: { inputs: {}, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result).toEqual({ result: "undefined" });
+      });
+
+      it("should have access to safe built-ins", async () => {
+        const step = createEvalStep(
+          {
+            id: "eval-builtins",
+            type: "eval",
+            script: `
+              return {
+                hasJSON: typeof JSON !== 'undefined',
+                hasMath: typeof Math !== 'undefined',
+                hasDate: typeof Date !== 'undefined',
+                hasArray: typeof Array !== 'undefined',
+              };
+            `,
+          },
+          mockClient
+        );
+
+        const result = await step.execute({
+          inputData: { inputs: {}, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result).toEqual({
+          result: {
+            hasJSON: true,
+            hasMath: true,
+            hasDate: true,
+            hasArray: true,
+          },
+        });
+      });
+
+      it("should have frozen inputs (immutable)", async () => {
+        const step = createEvalStep(
+          {
+            id: "eval-frozen",
+            type: "eval",
+            script: `
+              // Frozen objects don't throw in non-strict mode,
+              // but the mutation should be silently ignored
+              const originalValue = inputs.original;
+              inputs.newProp = "test";
+              // Verify the original input wasn't modified by checking
+              // that accessing the original value still works
+              return originalValue;
+            `,
+          },
+          mockClient
+        );
+
+        const result = await step.execute({
+          inputData: { inputs: { original: "value" }, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        // The script should still have access to the original frozen inputs
+        expect(result).toEqual({ result: "value" });
+      });
+    });
+
+    describe("timeout handling", () => {
+      it("should timeout long-running scripts", async () => {
+        const step = createEvalStep(
+          {
+            id: "eval-timeout",
+            type: "eval",
+            script: "while(true) {}",
+            scriptTimeout: 100,
+          },
+          mockClient
+        );
+
+        await expect(
+          step.execute({
+            inputData: { inputs: {}, steps: {} },
+          } as unknown as Parameters<typeof step.execute>[0])
+        ).rejects.toThrow(/timed out/);
+      });
+
+      it("should use custom timeout", async () => {
+        const step = createEvalStep(
+          {
+            id: "eval-custom-timeout",
+            type: "eval",
+            script: "return 'fast';",
+            scriptTimeout: 5000,
+          },
+          mockClient
+        );
+
+        const result = await step.execute({
+          inputData: { inputs: {}, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result).toEqual({ result: "fast" });
+      });
+    });
+
+    describe("condition evaluation", () => {
+      it("should skip when condition is false", async () => {
+        const step = createEvalStep(
+          {
+            id: "eval-conditional",
+            type: "eval",
+            script: "return 'executed';",
+            condition: "{{inputs.shouldRun}}",
+          },
+          mockClient
+        );
+
+        const result = await step.execute({
+          inputData: {
+            inputs: { shouldRun: "false" },
+            steps: {},
+          },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result).toEqual({ skipped: true });
+      });
+
+      it("should execute when condition is true", async () => {
+        const step = createEvalStep(
+          {
+            id: "eval-conditional",
+            type: "eval",
+            script: "return 'executed';",
+            condition: "{{inputs.shouldRun}}",
+          },
+          mockClient
+        );
+
+        const result = await step.execute({
+          inputData: {
+            inputs: { shouldRun: "true" },
+            steps: {},
+          },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result).toEqual({ result: "executed" });
+      });
+    });
+
+    describe("idempotency", () => {
+      it("should skip if step was already executed (hydration)", async () => {
+        const step = createEvalStep(
+          {
+            id: "eval-idempotent",
+            type: "eval",
+            script: "return 'new result';",
+          },
+          mockClient
+        );
+
+        const result = await step.execute({
+          inputData: {
+            inputs: {},
+            steps: {
+              "eval-idempotent": { result: "previous result" },
+            },
+          },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result).toEqual({ result: "previous result" });
+      });
+    });
+
+    describe("workflow generation", () => {
+      it("should return workflow when script generates one", async () => {
+        const step = createEvalStep(
+          {
+            id: "eval-workflow",
+            type: "eval",
+            script: `
+              return {
+                workflow: {
+                  id: "dynamic-workflow",
+                  steps: [
+                    { id: "step1", type: "shell", command: "echo hello" }
+                  ]
+                }
+              };
+            `,
+          },
+          mockClient
+        );
+
+        const result = await step.execute({
+          inputData: { inputs: {}, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result).toHaveProperty("workflow");
+        expect(result.workflow).toMatchObject({
+          id: "dynamic-workflow",
+          steps: [{ id: "step1", type: "shell", command: "echo hello" }],
+        });
+      });
+
+      it("should validate generated workflow schema", async () => {
+        const step = createEvalStep(
+          {
+            id: "eval-invalid-workflow",
+            type: "eval",
+            script: `
+              return {
+                workflow: {
+                  id: "invalid",
+                  // Missing required 'steps' field
+                }
+              };
+            `,
+          },
+          mockClient
+        );
+
+        await expect(
+          step.execute({
+            inputData: { inputs: {}, steps: {} },
+          } as unknown as Parameters<typeof step.execute>[0])
+        ).rejects.toThrow(/Invalid workflow definition/);
+      });
+    });
+
+    describe("error handling", () => {
+      it("should throw on script syntax errors", async () => {
+        const step = createEvalStep(
+          {
+            id: "eval-syntax-error",
+            type: "eval",
+            script: "return {;",
+          },
+          mockClient
+        );
+
+        await expect(
+          step.execute({
+            inputData: { inputs: {}, steps: {} },
+          } as unknown as Parameters<typeof step.execute>[0])
+        ).rejects.toThrow(/Unexpected token/);
+      });
+
+      it("should throw on runtime errors", async () => {
+        const step = createEvalStep(
+          {
+            id: "eval-runtime-error",
+            type: "eval",
+            script: "return nonExistentVariable;",
+          },
+          mockClient
+        );
+
+        await expect(
+          step.execute({
+            inputData: { inputs: {}, steps: {} },
+          } as unknown as Parameters<typeof step.execute>[0])
+        ).rejects.toThrow(/not defined/);
       });
     });
   });

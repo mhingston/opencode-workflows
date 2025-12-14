@@ -31,7 +31,9 @@
             "enum": [
               "string",
               "number",
-              "boolean"
+              "boolean",
+              "object",
+              "array"
             ]
           }
         },
@@ -105,6 +107,15 @@
                   "failOnError": {
                     "type": "boolean",
                     "default": true
+                  },
+                  "safe": {
+                    "type": "boolean"
+                  },
+                  "args": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
                   }
                 },
                 "required": [
@@ -703,13 +714,132 @@
                       "type"
                     ],
                     "additionalProperties": true
+                  },
+                  "runSteps": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string",
+                          "enum": [
+                            "shell",
+                            "tool",
+                            "agent",
+                            "suspend",
+                            "wait",
+                            "http",
+                            "file"
+                          ]
+                        },
+                        "description": {
+                          "type": "string"
+                        },
+                        "after": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "condition": {
+                          "type": "string"
+                        },
+                        "timeout": {
+                          "type": "number",
+                          "exclusiveMinimum": 0
+                        },
+                        "retry": {
+                          "type": "object",
+                          "properties": {
+                            "attempts": {
+                              "type": "integer",
+                              "exclusiveMinimum": 0
+                            },
+                            "delay": {
+                              "type": "number",
+                              "exclusiveMinimum": 0
+                            }
+                          },
+                          "required": [
+                            "attempts"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "type"
+                      ],
+                      "additionalProperties": true
+                    }
                   }
                 },
                 "required": [
                   "id",
                   "type",
-                  "items",
-                  "runStep"
+                  "items"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "type": {
+                    "type": "string",
+                    "const": "eval"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "after": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "condition": {
+                    "type": "string"
+                  },
+                  "timeout": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
+                  },
+                  "retry": {
+                    "type": "object",
+                    "properties": {
+                      "attempts": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0
+                      },
+                      "delay": {
+                        "type": "number",
+                        "exclusiveMinimum": 0
+                      }
+                    },
+                    "required": [
+                      "attempts"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "script": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "scriptTimeout": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
+                  }
+                },
+                "required": [
+                  "id",
+                  "type",
+                  "script"
                 ],
                 "additionalProperties": false
               }
@@ -737,6 +867,1612 @@
             }
           },
           "additionalProperties": false
+        },
+        "onFailure": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "type": {
+                    "type": "string",
+                    "const": "shell"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "after": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "condition": {
+                    "type": "string"
+                  },
+                  "timeout": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
+                  },
+                  "retry": {
+                    "type": "object",
+                    "properties": {
+                      "attempts": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0
+                      },
+                      "delay": {
+                        "type": "number",
+                        "exclusiveMinimum": 0
+                      }
+                    },
+                    "required": [
+                      "attempts"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "command": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "cwd": {
+                    "type": "string"
+                  },
+                  "env": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "string"
+                    }
+                  },
+                  "failOnError": {
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "safe": {
+                    "type": "boolean"
+                  },
+                  "args": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "id",
+                  "type",
+                  "command"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "type": {
+                    "type": "string",
+                    "const": "tool"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "after": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "condition": {
+                    "type": "string"
+                  },
+                  "timeout": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
+                  },
+                  "retry": {
+                    "type": "object",
+                    "properties": {
+                      "attempts": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0
+                      },
+                      "delay": {
+                        "type": "number",
+                        "exclusiveMinimum": 0
+                      }
+                    },
+                    "required": [
+                      "attempts"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "tool": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "args": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "boolean"
+                        },
+                        {
+                          "type": "null"
+                        },
+                        {
+                          "type": "array",
+                          "items": {}
+                        },
+                        {
+                          "type": "object",
+                          "additionalProperties": {}
+                        }
+                      ]
+                    }
+                  }
+                },
+                "required": [
+                  "id",
+                  "type",
+                  "tool"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "type": {
+                    "type": "string",
+                    "const": "agent"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "after": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "condition": {
+                    "type": "string"
+                  },
+                  "timeout": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
+                  },
+                  "retry": {
+                    "type": "object",
+                    "properties": {
+                      "attempts": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0
+                      },
+                      "delay": {
+                        "type": "number",
+                        "exclusiveMinimum": 0
+                      }
+                    },
+                    "required": [
+                      "attempts"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "prompt": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "agent": {
+                    "type": "string"
+                  },
+                  "system": {
+                    "type": "string"
+                  },
+                  "maxTokens": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
+                  }
+                },
+                "required": [
+                  "id",
+                  "type",
+                  "prompt"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "type": {
+                    "type": "string",
+                    "const": "suspend"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "after": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "condition": {
+                    "type": "string"
+                  },
+                  "timeout": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
+                  },
+                  "retry": {
+                    "type": "object",
+                    "properties": {
+                      "attempts": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0
+                      },
+                      "delay": {
+                        "type": "number",
+                        "exclusiveMinimum": 0
+                      }
+                    },
+                    "required": [
+                      "attempts"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "message": {
+                    "type": "string"
+                  },
+                  "resumeSchema": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "boolean"
+                        },
+                        {
+                          "type": "null"
+                        },
+                        {
+                          "type": "array",
+                          "items": {}
+                        },
+                        {
+                          "type": "object",
+                          "additionalProperties": {}
+                        }
+                      ]
+                    }
+                  }
+                },
+                "required": [
+                  "id",
+                  "type"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "type": {
+                    "type": "string",
+                    "const": "wait"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "after": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "condition": {
+                    "type": "string"
+                  },
+                  "timeout": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
+                  },
+                  "retry": {
+                    "type": "object",
+                    "properties": {
+                      "attempts": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0
+                      },
+                      "delay": {
+                        "type": "number",
+                        "exclusiveMinimum": 0
+                      }
+                    },
+                    "required": [
+                      "attempts"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "durationMs": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0
+                  }
+                },
+                "required": [
+                  "id",
+                  "type",
+                  "durationMs"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "type": {
+                    "type": "string",
+                    "const": "http"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "after": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "condition": {
+                    "type": "string"
+                  },
+                  "timeout": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
+                  },
+                  "retry": {
+                    "type": "object",
+                    "properties": {
+                      "attempts": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0
+                      },
+                      "delay": {
+                        "type": "number",
+                        "exclusiveMinimum": 0
+                      }
+                    },
+                    "required": [
+                      "attempts"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "method": {
+                    "type": "string",
+                    "enum": [
+                      "GET",
+                      "POST",
+                      "PUT",
+                      "PATCH",
+                      "DELETE",
+                      "HEAD",
+                      "OPTIONS"
+                    ]
+                  },
+                  "url": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "headers": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "string"
+                    }
+                  },
+                  "body": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "boolean"
+                      },
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "type": "array",
+                        "items": {}
+                      },
+                      {
+                        "type": "object",
+                        "additionalProperties": {}
+                      }
+                    ]
+                  },
+                  "failOnError": {
+                    "type": "boolean",
+                    "default": true
+                  }
+                },
+                "required": [
+                  "id",
+                  "type",
+                  "method",
+                  "url"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "type": {
+                    "type": "string",
+                    "const": "file"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "after": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "condition": {
+                    "type": "string"
+                  },
+                  "timeout": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
+                  },
+                  "retry": {
+                    "type": "object",
+                    "properties": {
+                      "attempts": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0
+                      },
+                      "delay": {
+                        "type": "number",
+                        "exclusiveMinimum": 0
+                      }
+                    },
+                    "required": [
+                      "attempts"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "action": {
+                    "type": "string",
+                    "enum": [
+                      "read",
+                      "write",
+                      "delete"
+                    ]
+                  },
+                  "path": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "content": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "number"
+                          },
+                          {
+                            "type": "boolean"
+                          },
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "type": "array",
+                            "items": {}
+                          },
+                          {
+                            "type": "object",
+                            "additionalProperties": {}
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "id",
+                  "type",
+                  "action",
+                  "path"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "type": {
+                    "type": "string",
+                    "const": "iterator"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "after": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "condition": {
+                    "type": "string"
+                  },
+                  "timeout": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
+                  },
+                  "retry": {
+                    "type": "object",
+                    "properties": {
+                      "attempts": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0
+                      },
+                      "delay": {
+                        "type": "number",
+                        "exclusiveMinimum": 0
+                      }
+                    },
+                    "required": [
+                      "attempts"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "runStep": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "type": {
+                        "type": "string",
+                        "enum": [
+                          "shell",
+                          "tool",
+                          "agent",
+                          "suspend",
+                          "wait",
+                          "http",
+                          "file"
+                        ]
+                      },
+                      "description": {
+                        "type": "string"
+                      },
+                      "after": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "condition": {
+                        "type": "string"
+                      },
+                      "timeout": {
+                        "type": "number",
+                        "exclusiveMinimum": 0
+                      },
+                      "retry": {
+                        "type": "object",
+                        "properties": {
+                          "attempts": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0
+                          },
+                          "delay": {
+                            "type": "number",
+                            "exclusiveMinimum": 0
+                          }
+                        },
+                        "required": [
+                          "attempts"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "type"
+                    ],
+                    "additionalProperties": true
+                  },
+                  "runSteps": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string",
+                          "enum": [
+                            "shell",
+                            "tool",
+                            "agent",
+                            "suspend",
+                            "wait",
+                            "http",
+                            "file"
+                          ]
+                        },
+                        "description": {
+                          "type": "string"
+                        },
+                        "after": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "condition": {
+                          "type": "string"
+                        },
+                        "timeout": {
+                          "type": "number",
+                          "exclusiveMinimum": 0
+                        },
+                        "retry": {
+                          "type": "object",
+                          "properties": {
+                            "attempts": {
+                              "type": "integer",
+                              "exclusiveMinimum": 0
+                            },
+                            "delay": {
+                              "type": "number",
+                              "exclusiveMinimum": 0
+                            }
+                          },
+                          "required": [
+                            "attempts"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "type"
+                      ],
+                      "additionalProperties": true
+                    }
+                  }
+                },
+                "required": [
+                  "id",
+                  "type",
+                  "items"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "type": {
+                    "type": "string",
+                    "const": "eval"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "after": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "condition": {
+                    "type": "string"
+                  },
+                  "timeout": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
+                  },
+                  "retry": {
+                    "type": "object",
+                    "properties": {
+                      "attempts": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0
+                      },
+                      "delay": {
+                        "type": "number",
+                        "exclusiveMinimum": 0
+                      }
+                    },
+                    "required": [
+                      "attempts"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "script": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "scriptTimeout": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
+                  }
+                },
+                "required": [
+                  "id",
+                  "type",
+                  "script"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          }
+        },
+        "finally": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "type": {
+                    "type": "string",
+                    "const": "shell"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "after": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "condition": {
+                    "type": "string"
+                  },
+                  "timeout": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
+                  },
+                  "retry": {
+                    "type": "object",
+                    "properties": {
+                      "attempts": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0
+                      },
+                      "delay": {
+                        "type": "number",
+                        "exclusiveMinimum": 0
+                      }
+                    },
+                    "required": [
+                      "attempts"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "command": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "cwd": {
+                    "type": "string"
+                  },
+                  "env": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "string"
+                    }
+                  },
+                  "failOnError": {
+                    "type": "boolean",
+                    "default": true
+                  },
+                  "safe": {
+                    "type": "boolean"
+                  },
+                  "args": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "required": [
+                  "id",
+                  "type",
+                  "command"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "type": {
+                    "type": "string",
+                    "const": "tool"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "after": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "condition": {
+                    "type": "string"
+                  },
+                  "timeout": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
+                  },
+                  "retry": {
+                    "type": "object",
+                    "properties": {
+                      "attempts": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0
+                      },
+                      "delay": {
+                        "type": "number",
+                        "exclusiveMinimum": 0
+                      }
+                    },
+                    "required": [
+                      "attempts"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "tool": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "args": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "boolean"
+                        },
+                        {
+                          "type": "null"
+                        },
+                        {
+                          "type": "array",
+                          "items": {}
+                        },
+                        {
+                          "type": "object",
+                          "additionalProperties": {}
+                        }
+                      ]
+                    }
+                  }
+                },
+                "required": [
+                  "id",
+                  "type",
+                  "tool"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "type": {
+                    "type": "string",
+                    "const": "agent"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "after": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "condition": {
+                    "type": "string"
+                  },
+                  "timeout": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
+                  },
+                  "retry": {
+                    "type": "object",
+                    "properties": {
+                      "attempts": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0
+                      },
+                      "delay": {
+                        "type": "number",
+                        "exclusiveMinimum": 0
+                      }
+                    },
+                    "required": [
+                      "attempts"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "prompt": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "agent": {
+                    "type": "string"
+                  },
+                  "system": {
+                    "type": "string"
+                  },
+                  "maxTokens": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
+                  }
+                },
+                "required": [
+                  "id",
+                  "type",
+                  "prompt"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "type": {
+                    "type": "string",
+                    "const": "suspend"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "after": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "condition": {
+                    "type": "string"
+                  },
+                  "timeout": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
+                  },
+                  "retry": {
+                    "type": "object",
+                    "properties": {
+                      "attempts": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0
+                      },
+                      "delay": {
+                        "type": "number",
+                        "exclusiveMinimum": 0
+                      }
+                    },
+                    "required": [
+                      "attempts"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "message": {
+                    "type": "string"
+                  },
+                  "resumeSchema": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "number"
+                        },
+                        {
+                          "type": "boolean"
+                        },
+                        {
+                          "type": "null"
+                        },
+                        {
+                          "type": "array",
+                          "items": {}
+                        },
+                        {
+                          "type": "object",
+                          "additionalProperties": {}
+                        }
+                      ]
+                    }
+                  }
+                },
+                "required": [
+                  "id",
+                  "type"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "type": {
+                    "type": "string",
+                    "const": "wait"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "after": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "condition": {
+                    "type": "string"
+                  },
+                  "timeout": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
+                  },
+                  "retry": {
+                    "type": "object",
+                    "properties": {
+                      "attempts": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0
+                      },
+                      "delay": {
+                        "type": "number",
+                        "exclusiveMinimum": 0
+                      }
+                    },
+                    "required": [
+                      "attempts"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "durationMs": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0
+                  }
+                },
+                "required": [
+                  "id",
+                  "type",
+                  "durationMs"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "type": {
+                    "type": "string",
+                    "const": "http"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "after": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "condition": {
+                    "type": "string"
+                  },
+                  "timeout": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
+                  },
+                  "retry": {
+                    "type": "object",
+                    "properties": {
+                      "attempts": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0
+                      },
+                      "delay": {
+                        "type": "number",
+                        "exclusiveMinimum": 0
+                      }
+                    },
+                    "required": [
+                      "attempts"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "method": {
+                    "type": "string",
+                    "enum": [
+                      "GET",
+                      "POST",
+                      "PUT",
+                      "PATCH",
+                      "DELETE",
+                      "HEAD",
+                      "OPTIONS"
+                    ]
+                  },
+                  "url": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "headers": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "string"
+                    }
+                  },
+                  "body": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "boolean"
+                      },
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "type": "array",
+                        "items": {}
+                      },
+                      {
+                        "type": "object",
+                        "additionalProperties": {}
+                      }
+                    ]
+                  },
+                  "failOnError": {
+                    "type": "boolean",
+                    "default": true
+                  }
+                },
+                "required": [
+                  "id",
+                  "type",
+                  "method",
+                  "url"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "type": {
+                    "type": "string",
+                    "const": "file"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "after": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "condition": {
+                    "type": "string"
+                  },
+                  "timeout": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
+                  },
+                  "retry": {
+                    "type": "object",
+                    "properties": {
+                      "attempts": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0
+                      },
+                      "delay": {
+                        "type": "number",
+                        "exclusiveMinimum": 0
+                      }
+                    },
+                    "required": [
+                      "attempts"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "action": {
+                    "type": "string",
+                    "enum": [
+                      "read",
+                      "write",
+                      "delete"
+                    ]
+                  },
+                  "path": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "content": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "number"
+                          },
+                          {
+                            "type": "boolean"
+                          },
+                          {
+                            "type": "null"
+                          },
+                          {
+                            "type": "array",
+                            "items": {}
+                          },
+                          {
+                            "type": "object",
+                            "additionalProperties": {}
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "id",
+                  "type",
+                  "action",
+                  "path"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "type": {
+                    "type": "string",
+                    "const": "iterator"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "after": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "condition": {
+                    "type": "string"
+                  },
+                  "timeout": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
+                  },
+                  "retry": {
+                    "type": "object",
+                    "properties": {
+                      "attempts": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0
+                      },
+                      "delay": {
+                        "type": "number",
+                        "exclusiveMinimum": 0
+                      }
+                    },
+                    "required": [
+                      "attempts"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "runStep": {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "type": {
+                        "type": "string",
+                        "enum": [
+                          "shell",
+                          "tool",
+                          "agent",
+                          "suspend",
+                          "wait",
+                          "http",
+                          "file"
+                        ]
+                      },
+                      "description": {
+                        "type": "string"
+                      },
+                      "after": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      },
+                      "condition": {
+                        "type": "string"
+                      },
+                      "timeout": {
+                        "type": "number",
+                        "exclusiveMinimum": 0
+                      },
+                      "retry": {
+                        "type": "object",
+                        "properties": {
+                          "attempts": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0
+                          },
+                          "delay": {
+                            "type": "number",
+                            "exclusiveMinimum": 0
+                          }
+                        },
+                        "required": [
+                          "attempts"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "type"
+                    ],
+                    "additionalProperties": true
+                  },
+                  "runSteps": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "type": {
+                          "type": "string",
+                          "enum": [
+                            "shell",
+                            "tool",
+                            "agent",
+                            "suspend",
+                            "wait",
+                            "http",
+                            "file"
+                          ]
+                        },
+                        "description": {
+                          "type": "string"
+                        },
+                        "after": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        },
+                        "condition": {
+                          "type": "string"
+                        },
+                        "timeout": {
+                          "type": "number",
+                          "exclusiveMinimum": 0
+                        },
+                        "retry": {
+                          "type": "object",
+                          "properties": {
+                            "attempts": {
+                              "type": "integer",
+                              "exclusiveMinimum": 0
+                            },
+                            "delay": {
+                              "type": "number",
+                              "exclusiveMinimum": 0
+                            }
+                          },
+                          "required": [
+                            "attempts"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "required": [
+                        "type"
+                      ],
+                      "additionalProperties": true
+                    }
+                  }
+                },
+                "required": [
+                  "id",
+                  "type",
+                  "items"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "type": {
+                    "type": "string",
+                    "const": "eval"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "after": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "condition": {
+                    "type": "string"
+                  },
+                  "timeout": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
+                  },
+                  "retry": {
+                    "type": "object",
+                    "properties": {
+                      "attempts": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0
+                      },
+                      "delay": {
+                        "type": "number",
+                        "exclusiveMinimum": 0
+                      }
+                    },
+                    "required": [
+                      "attempts"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "script": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "scriptTimeout": {
+                    "type": "number",
+                    "exclusiveMinimum": 0
+                  }
+                },
+                "required": [
+                  "id",
+                  "type",
+                  "script"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          }
         }
       },
       "required": [

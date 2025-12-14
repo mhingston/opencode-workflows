@@ -1,0 +1,15 @@
+$schema: https://raw.githubusercontent.com/mark-hingston/opencode-workflows/main/schemas/workflow.schema.json
+id: test-on-save-yaml
+name: Run Tests on File Change
+description: Automatically run tests when TypeScript files are modified
+
+# File change trigger - runs whenever matching files are saved
+trigger:
+  event: file.change
+  pattern: "src/**/*.{ts,tsx}"
+
+steps:
+  - id: run-tests
+    type: shell
+    description: Run the test suite
+    command: npm test

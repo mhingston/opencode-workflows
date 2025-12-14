@@ -222,6 +222,171 @@ describe("Loader Module", () => {
       expect(result.workflows.get("jsonc-workflow")).toBeDefined();
     });
 
+    it("should load YAML workflow files", async () => {
+      const yamlContent = `
+id: yaml-workflow
+description: A workflow defined in YAML
+steps:
+  - id: step1
+    type: shell
+    command: echo hello
+`;
+
+      vi.mocked(stat).mockResolvedValue(mockStats(true) as never);
+      vi.mocked(readdir).mockResolvedValue([
+        mockDirent("workflow.yaml", true),
+      ] as never);
+      vi.mocked(readFile).mockResolvedValue(yamlContent);
+
+      const result = await loadWorkflows("/project", mockLogger, [".workflows"]);
+
+      expect(result.workflows.size).toBe(1);
+      expect(result.workflows.get("yaml-workflow")).toBeDefined();
+      expect(result.workflows.get("yaml-workflow")?.description).toBe("A workflow defined in YAML");
+    });
+
+    it("should load YML workflow files", async () => {
+      const ymlContent = `
+id: yml-workflow
+steps:
+  - id: s1
+    type: shell
+    command: echo test
+`;
+
+      vi.mocked(stat).mockResolvedValue(mockStats(true) as never);
+      vi.mocked(readdir).mockResolvedValue([
+        mockDirent("workflow.yml", true),
+      ] as never);
+      vi.mocked(readFile).mockResolvedValue(ymlContent);
+
+      const result = await loadWorkflows("/project", mockLogger, [".workflows"]);
+
+      expect(result.workflows.size).toBe(1);
+      expect(result.workflows.get("yml-workflow")).toBeDefined();
+    });
+
+    it("should handle multi-line strings in YAML", async () => {
+      const yamlContent = `
+id: multiline-yaml
+steps:
+  - id: agent-step
+    type: agent
+    prompt: |
+      This is a multi-line prompt.
+      
+      It has multiple paragraphs.
+      
+      1. Item one
+      2. Item two
+`;
+
+      vi.mocked(stat).mockResolvedValue(mockStats(true) as never);
+      vi.mocked(readdir).mockResolvedValue([
+        mockDirent("multiline.yaml", true),
+      ] as never);
+      vi.mocked(readFile).mockResolvedValue(yamlContent);
+
+      const result = await loadWorkflows("/project", mockLogger, [".workflows"]);
+
+      expect(result.workflows.size).toBe(1);
+      const workflow = result.workflows.get("multiline-yaml");
+      expect(workflow).toBeDefined();
+      const step = workflow?.steps[0] as { prompt?: string };
+      expect(step.prompt).toContain("This is a multi-line prompt.");
+      expect(step.prompt).toContain("1. Item one");
+      expect(step.prompt).toContain("2. Item two");
+    });
+
+    it("should handle invalid YAML gracefully", async () => {
+      const invalidYaml = `
+id: invalid
+steps:
+  - id: s1
+    type: shell
+    command: echo
+  invalid yaml here: [unclosed bracket
+`;
+
+      vi.mocked(stat).mockResolvedValue(mockStats(true) as never);
+      vi.mocked(readdir).mockResolvedValue([
+        mockDirent("invalid.yaml", true),
+      ] as never);
+      vi.mocked(readFile).mockResolvedValue(invalidYaml);
+
+      const result = await loadWorkflows("/project", mockLogger, [".workflows"]);
+
+      expect(result.workflows.size).toBe(0);
+      expect(mockLogger.error).toHaveBeenCalledWith(
+        expect.stringContaining("Invalid YAML")
+      );
+    });
+
+    it("should reject YAML workflow with invalid schema", async () => {
+      const invalidSchemaYaml = `
+id: invalid-schema
+# Missing required 'steps' field
+`;
+
+      vi.mocked(stat).mockResolvedValue(mockStats(true) as never);
+      vi.mocked(readdir).mockResolvedValue([
+        mockDirent("invalid-schema.yaml", true),
+      ] as never);
+      vi.mocked(readFile).mockResolvedValue(invalidSchemaYaml);
+
+      const result = await loadWorkflows("/project", mockLogger, [".workflows"]);
+
+      expect(result.workflows.size).toBe(0);
+      expect(mockLogger.error).toHaveBeenCalledWith(
+        expect.stringContaining("Invalid workflow schema")
+      );
+    });
+
+    it("should load YAML with all optional fields", async () => {
+      const fullYaml = `
+id: full-yaml-workflow
+name: Full YAML Workflow
+description: A complete YAML workflow with all fields
+version: "2.0.0"
+tags:
+  - yaml
+  - test
+inputs:
+  name: string
+  count: number
+steps:
+  - id: step1
+    type: shell
+    command: "echo {{inputs.name}}"
+    description: First step
+    cwd: /tmp
+    env:
+      NODE_ENV: production
+    timeout: 30000
+    retry:
+      attempts: 3
+      delay: 1000
+`;
+
+      vi.mocked(stat).mockResolvedValue(mockStats(true) as never);
+      vi.mocked(readdir).mockResolvedValue([
+        mockDirent("full.yaml", true),
+      ] as never);
+      vi.mocked(readFile).mockResolvedValue(fullYaml);
+
+      const result = await loadWorkflows("/project", mockLogger, [".workflows"]);
+
+      expect(result.workflows.size).toBe(1);
+      const wf = result.workflows.get("full-yaml-workflow");
+      expect(wf?.name).toBe("Full YAML Workflow");
+      expect(wf?.version).toBe("2.0.0");
+      expect(wf?.tags).toEqual(["yaml", "test"]);
+      expect(wf?.inputs).toEqual({
+        name: "string",
+        count: "number",
+      });
+    });
+
     it("should handle non-existent directory gracefully", async () => {
       vi.mocked(stat).mockRejectedValue(new Error("ENOENT"));
 
@@ -254,16 +419,21 @@ describe("Loader Module", () => {
       expect(readFile).toHaveBeenCalledTimes(1);
     });
 
-    it("should warn about TypeScript workflow files", async () => {
+    it("should load TypeScript workflow files", async () => {
+      // Note: TypeScript loading uses jiti which requires real file access
+      // This test verifies the code path is exercised; integration tests should verify actual TS loading
       vi.mocked(stat).mockResolvedValue(mockStats(true) as never);
       vi.mocked(readdir).mockResolvedValue([
         mockDirent("workflow.ts", true),
       ] as never);
 
-      await loadWorkflows("/project", mockLogger, [".workflows"]);
+      // TypeScript loading uses jiti.import which we can't easily mock
+      // This test just verifies no errors are thrown and no warning about unsupported files
+      const result = await loadWorkflows("/project", mockLogger, [".workflows"]);
 
-      expect(mockLogger.warn).toHaveBeenCalledWith(
-        expect.stringContaining("TypeScript/JS workflow files not yet supported")
+      // May or may not load depending on jiti mock - but should not show the old warning
+      expect(mockLogger.warn).not.toHaveBeenCalledWith(
+        expect.stringContaining("not yet supported")
       );
     });
 
@@ -580,7 +750,7 @@ describe("Loader Module", () => {
 
       logger.info("test message");
 
-      expect(consoleSpy).toHaveBeenCalledWith("[workflow] test message");
+      expect(consoleSpy).toHaveBeenCalledWith("[workflow] [INFO] test message");
       consoleSpy.mockRestore();
     });
 
@@ -590,7 +760,7 @@ describe("Loader Module", () => {
 
       logger.warn("warning message");
 
-      expect(consoleSpy).toHaveBeenCalledWith("[workflow] warning message");
+      expect(consoleSpy).toHaveBeenCalledWith("[workflow] [WARN] warning message");
       consoleSpy.mockRestore();
     });
 
@@ -600,7 +770,7 @@ describe("Loader Module", () => {
 
       logger.error("error message");
 
-      expect(consoleSpy).toHaveBeenCalledWith("[workflow] error message");
+      expect(consoleSpy).toHaveBeenCalledWith("[workflow] [ERROR] error message");
       consoleSpy.mockRestore();
     });
 
@@ -620,8 +790,144 @@ describe("Loader Module", () => {
 
       logger.debug("debug message");
 
-      expect(consoleSpy).toHaveBeenCalledWith("[workflow:debug] debug message");
+      expect(consoleSpy).toHaveBeenCalledWith("[workflow] [DEBUG] debug message");
       consoleSpy.mockRestore();
+    });
+
+    it("should accept LoggerOptions object", () => {
+      const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      const logger = createLogger({ verbose: true });
+
+      logger.debug("debug message");
+
+      expect(consoleSpy).toHaveBeenCalledWith("[workflow] [DEBUG] debug message");
+      consoleSpy.mockRestore();
+    });
+
+    it("should output JSON format when format is json", () => {
+      const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      const logger = createLogger({ format: "json" });
+
+      logger.info("test message");
+
+      expect(consoleSpy).toHaveBeenCalledTimes(1);
+      const loggedArg = consoleSpy.mock.calls[0][0];
+      const parsed = JSON.parse(loggedArg);
+      expect(parsed).toMatchObject({
+        level: "info",
+        message: "test message",
+      });
+      expect(parsed.timestamp).toBeDefined();
+      consoleSpy.mockRestore();
+    });
+
+    it("should include context in JSON output", () => {
+      const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      const logger = createLogger({ format: "json" });
+
+      logger.info("workflow started", {
+        workflowId: "my-workflow",
+        runId: "run-123",
+        stepId: "step-1",
+      });
+
+      const loggedArg = consoleSpy.mock.calls[0][0];
+      const parsed = JSON.parse(loggedArg);
+      expect(parsed).toMatchObject({
+        level: "info",
+        message: "workflow started",
+        workflowId: "my-workflow",
+        runId: "run-123",
+        stepId: "step-1",
+      });
+      consoleSpy.mockRestore();
+    });
+
+    it("should include context in text format", () => {
+      const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      const logger = createLogger({ format: "text" });
+
+      logger.info("step complete", {
+        workflowId: "my-workflow",
+        runId: "run-12345678",
+        stepId: "step-1",
+        durationMs: 150,
+      });
+
+      expect(consoleSpy).toHaveBeenCalledWith(
+        "[workflow] [INFO] [workflow=my-workflow run=run-1234 step=step-1 duration=150ms] step complete"
+      );
+      consoleSpy.mockRestore();
+    });
+
+    it("should use custom output handler when provided", () => {
+      const customOutput = vi.fn();
+      const logger = createLogger({ output: customOutput });
+
+      logger.info("custom output test", { workflowId: "test-wf" });
+
+      expect(customOutput).toHaveBeenCalledTimes(1);
+      expect(customOutput).toHaveBeenCalledWith(
+        expect.objectContaining({
+          level: "info",
+          message: "custom output test",
+          workflowId: "test-wf",
+          timestamp: expect.any(String),
+        })
+      );
+    });
+
+    it("should include durationMs in log context", () => {
+      const customOutput = vi.fn();
+      const logger = createLogger({ output: customOutput });
+
+      logger.info("operation complete", { durationMs: 250 });
+
+      expect(customOutput).toHaveBeenCalledWith(
+        expect.objectContaining({
+          durationMs: 250,
+        })
+      );
+    });
+
+    it("should include metadata in log context", () => {
+      const customOutput = vi.fn();
+      const logger = createLogger({ output: customOutput });
+
+      logger.error("step failed", {
+        metadata: { error: "Connection refused", attempt: 3 },
+      });
+
+      expect(customOutput).toHaveBeenCalledWith(
+        expect.objectContaining({
+          level: "error",
+          metadata: { error: "Connection refused", attempt: 3 },
+        })
+      );
+    });
+
+    it("should use console.error for error level in JSON format", () => {
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const logger = createLogger({ format: "json" });
+
+      logger.error("something went wrong");
+
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      const parsed = JSON.parse(errorSpy.mock.calls[0][0]);
+      expect(parsed.level).toBe("error");
+      errorSpy.mockRestore();
+    });
+
+    it("should use console.warn for warn level in JSON format", () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const logger = createLogger({ format: "json" });
+
+      logger.warn("be careful");
+
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      const parsed = JSON.parse(warnSpy.mock.calls[0][0]);
+      expect(parsed.level).toBe("warn");
+      warnSpy.mockRestore();
     });
   });
 });

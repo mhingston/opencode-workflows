@@ -1,0 +1,46 @@
+$schema: https://raw.githubusercontent.com/mark-hingston/opencode-workflows/main/schemas/workflow.schema.json
+id: run-ci-yaml
+name: Run CI Pipeline
+description: Runs lint, tests, and type checks in parallel
+version: 1.0.0
+tags:
+  - ci
+  - testing
+
+steps:
+  - id: install-deps
+    type: shell
+    description: Install dependencies
+    command: npm ci
+
+  # These three steps run in parallel after install-deps
+  - id: lint
+    type: shell
+    description: Run linter
+    after: [install-deps]
+    command: npm run lint
+    failOnError: false
+
+  - id: typecheck
+    type: shell
+    description: Run type checking
+    after: [install-deps]
+    command: npm run typecheck
+
+  - id: test
+    type: shell
+    description: Run tests
+    after: [install-deps]
+    command: npm test
+
+  - id: summarize
+    type: agent
+    description: Generate CI summary
+    after: [lint, typecheck, test]
+    prompt: |
+      Summarize the CI pipeline results:
+      - Lint exited with: {{steps.lint.exitCode}}
+      - Typecheck exited with: {{steps.typecheck.exitCode}}
+      - Tests exited with: {{steps.test.exitCode}}
+
+      Provide a brief status report.

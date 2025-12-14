@@ -131,7 +131,8 @@ describe("WorkflowRunner", () => {
       expect(runId).toBe("test-uuid-1234");
       expect(mockFactory.get).toHaveBeenCalledWith("test-workflow");
       expect(mockLogger.info).toHaveBeenCalledWith(
-        expect.stringContaining("Starting workflow test-workflow")
+        expect.stringContaining("Starting workflow test-workflow"),
+        expect.objectContaining({ workflowId: "test-workflow", runId: "test-uuid-1234" })
       );
     });
 
@@ -168,7 +169,8 @@ describe("WorkflowRunner", () => {
       await new Promise((r) => setTimeout(r, 50));
 
       expect(mockLogger.info).toHaveBeenCalledWith(
-        expect.stringContaining("completed successfully")
+        expect.stringContaining("completed successfully"),
+        expect.objectContaining({ workflowId: "test-workflow", runId: "test-uuid-1234" })
       );
     });
 
@@ -184,7 +186,8 @@ describe("WorkflowRunner", () => {
       await new Promise((r) => setTimeout(r, 50));
 
       expect(mockLogger.info).toHaveBeenCalledWith(
-        expect.stringContaining("suspended at step")
+        expect.stringContaining("suspended at step"),
+        expect.objectContaining({ workflowId: "test-workflow", runId: "test-uuid-1234" })
       );
     });
 
@@ -197,7 +200,8 @@ describe("WorkflowRunner", () => {
       await new Promise((r) => setTimeout(r, 50));
 
       expect(mockLogger.error).toHaveBeenCalledWith(
-        expect.stringContaining("failed")
+        expect.stringContaining("failed"),
+        expect.objectContaining({ workflowId: "test-workflow", runId: "test-uuid-1234" })
       );
     });
 

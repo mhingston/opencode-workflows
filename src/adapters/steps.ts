@@ -1,9 +1,10 @@
 import { createStep } from "@mastra/core/workflows";
 import { z } from "zod";
-import { exec } from "node:child_process";
-import { promisify } from "node:util";
+import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { readFile, writeFile, unlink } from "node:fs/promises";
 import { resolve, normalize, isAbsolute } from "node:path";
+import { runInNewContext, type Context } from "node:vm";
+import treeKill from "tree-kill";
 import type {
   ShellStepDefinition,
   ToolStepDefinition,
@@ -13,15 +14,151 @@ import type {
   HttpStepDefinition,
   FileStepDefinition,
   IteratorStepDefinition,
+  EvalStepDefinition,
   StepDefinition,
   OpencodeClient,
   JsonValue,
   JsonObject,
+  WorkflowDefinition,
 } from "../types.js";
-import { JsonValueSchema } from "../types.js";
+import { JsonValueSchema, WorkflowDefinitionSchema } from "../types.js";
 import { interpolate, interpolateValue, interpolateWithSecrets } from "./interpolation.js";
 
-const execAsync = promisify(exec);
+// =============================================================================
+// Process Management
+// =============================================================================
+
+/** Set of currently running child processes for cleanup on cancellation */
+const activeProcesses = new Set<ChildProcess>();
+
+/**
+ * Kill a process tree gracefully, with fallback to SIGKILL.
+ * Ensures all child processes are terminated to prevent zombie processes.
+ */
+function killProcessTree(pid: number): Promise<void> {
+  return new Promise((resolve) => {
+    treeKill(pid, "SIGTERM", (err) => {
+      if (err) {
+        // Fallback to SIGKILL if SIGTERM fails
+        treeKill(pid, "SIGKILL", () => resolve());
+      } else {
+        resolve();
+      }
+    });
+  });
+}
+
+/**
+ * Execute a shell command using spawn with proper process cleanup.
+ * This replaces exec to provide better control over the child process lifecycle.
+ * 
+ * @param command - Command to execute (passed to shell if safe=false)
+ * @param options - Execution options
+ * @returns Promise with stdout, stderr, and exitCode
+ */
+async function executeCommand(
+  command: string,
+  options: {
+    cwd?: string;
+    env?: NodeJS.ProcessEnv;
+    timeout?: number;
+    safe?: boolean;
+    args?: string[];
+  } = {}
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  return new Promise((resolve, reject) => {
+    let child: ChildProcess;
+    
+    const spawnOptions: SpawnOptions = {
+      cwd: options.cwd,
+      env: options.env || process.env,
+    };
+    
+    if (options.safe && options.args) {
+      // Safe mode: bypass shell, run command directly with args array
+      // This prevents shell injection entirely
+      child = spawn(command, options.args, spawnOptions);
+    } else {
+      // Shell mode: use shell to interpret command (supports pipes, redirects, etc.)
+      // Platform-specific shell selection
+      const isWindows = process.platform === "win32";
+      const shell = isWindows ? "cmd.exe" : "/bin/sh";
+      const shellArgs = isWindows ? ["/c", command] : ["-c", command];
+      
+      child = spawn(shell, shellArgs, spawnOptions);
+    }
+    
+    activeProcesses.add(child);
+    
+    let stdout = "";
+    let stderr = "";
+    let killed = false;
+    let timeoutId: NodeJS.Timeout | undefined;
+    
+    // Handle timeout
+    if (options.timeout && options.timeout > 0) {
+      timeoutId = setTimeout(async () => {
+        killed = true;
+        if (child.pid) {
+          await killProcessTree(child.pid);
+        }
+        reject(Object.assign(
+          new Error(`Command timed out after ${options.timeout}ms`),
+          { code: null, stdout, stderr, killed: true }
+        ));
+      }, options.timeout);
+    }
+    
+    child.stdout?.on("data", (data) => {
+      stdout += data.toString();
+    });
+    
+    child.stderr?.on("data", (data) => {
+      stderr += data.toString();
+    });
+    
+    child.on("error", (err) => {
+      if (timeoutId) clearTimeout(timeoutId);
+      activeProcesses.delete(child);
+      reject(err);
+    });
+    
+    child.on("close", (code, signal) => {
+      if (timeoutId) clearTimeout(timeoutId);
+      activeProcesses.delete(child);
+      
+      if (killed) return; // Already handled by timeout
+      
+      if (signal) {
+        reject(Object.assign(
+          new Error(`Command killed by signal: ${signal}`),
+          { code: null, stdout, stderr, signal }
+        ));
+      } else {
+        resolve({
+          stdout,
+          stderr,
+          exitCode: code ?? 0,
+        });
+      }
+    });
+  });
+}
+
+/**
+ * Kill all active child processes. Call this during workflow cancellation
+ * to prevent zombie processes.
+ */
+export async function cleanupAllProcesses(): Promise<void> {
+  const killPromises = Array.from(activeProcesses).map((child) => {
+    if (child.pid) {
+      return killProcessTree(child.pid);
+    }
+    return Promise.resolve();
+  });
+  await Promise.all(killPromises);
+  activeProcesses.clear();
+}
 
 // =============================================================================
 // Security Utilities
@@ -146,9 +283,10 @@ function validateUrlForSSRF(urlString: string): string {
 /**
  * Input schema for step execution context.
  * Includes optional secretInputs array for masking sensitive values in logs.
+ * Supports complex input types (object, array) in addition to primitives.
  */
 const StepInputSchema = z.object({
-  inputs: z.record(z.union([z.string(), z.number(), z.boolean()])),
+  inputs: z.record(JsonValueSchema),
   steps: z.record(JsonValueSchema),
   secretInputs: z.array(z.string()).optional(),
 });
@@ -221,7 +359,13 @@ export function createShellStep(def: ShellStepDefinition, client: OpencodeClient
       // Log command execution to TUI (masked version to hide secrets)
       client.app.log(`> ${maskedCommand}`, "info");
 
-      const options: { cwd?: string; env?: NodeJS.ProcessEnv; timeout?: number } = {};
+      const options: { 
+        cwd?: string; 
+        env?: NodeJS.ProcessEnv; 
+        timeout?: number;
+        safe?: boolean;
+        args?: string[];
+      } = {};
 
       if (def.cwd) {
         options.cwd = interpolate(def.cwd, ctx);
@@ -240,26 +384,50 @@ export function createShellStep(def: ShellStepDefinition, client: OpencodeClient
         options.timeout = def.timeout;
       }
 
+      // Safe mode: use spawn without shell to prevent injection
+      if (def.safe) {
+        options.safe = true;
+        // In safe mode, args must be provided as an array
+        if (!def.args) {
+          throw new Error("Safe mode requires 'args' to be specified as an array");
+        }
+        options.args = def.args.map(arg => interpolate(arg, ctx));
+      }
+
       try {
-        const { stdout, stderr } = await execAsync(command, options);
+        const result = await executeCommand(command, options);
+        
+        // Check for non-zero exit code and throw if failOnError is enabled
+        if (result.exitCode !== 0 && def.failOnError !== false) {
+          throw new Error(
+            `Command failed with exit code ${result.exitCode}: ${result.stderr || result.stdout}`
+          );
+        }
+        
         return {
-          stdout: stdout.trim(),
-          stderr: stderr.trim(),
-          exitCode: 0,
+          stdout: result.stdout.trim(),
+          stderr: result.stderr.trim(),
+          exitCode: result.exitCode,
         };
       } catch (error) {
-        const execError = error as { stdout?: string; stderr?: string; code?: number };
+        // Re-throw if this is our own error from exit code check above
+        if (error instanceof Error && error.message.startsWith("Command failed with exit code")) {
+          throw error;
+        }
+        
+        // Handle spawn/process errors (timeout, killed, etc.)
+        const execError = error as { stdout?: string; stderr?: string; code?: number; exitCode?: number };
         
         if (def.failOnError !== false) {
           throw new Error(
-            `Command failed with exit code ${execError.code}: ${execError.stderr || execError.stdout}`
+            `Command failed with exit code ${execError.code ?? execError.exitCode ?? 1}: ${execError.stderr || execError.stdout || (error as Error).message}`
           );
         }
 
         return {
           stdout: execError.stdout?.trim() || "",
           stderr: execError.stderr?.trim() || "",
-          exitCode: execError.code || 1,
+          exitCode: execError.code ?? execError.exitCode ?? 1,
         };
       }
     },
@@ -791,9 +959,10 @@ const IteratorOutputSchema = z.object({
 
 /**
  * Execute a single step definition with the given context.
- * This is a simplified executor for inner steps within an iterator.
+ * This is a simplified executor for inner steps within an iterator or cleanup blocks.
+ * Exported for use by the runner for onFailure/finally step execution.
  */
-async function executeInnerStep(
+export async function executeInnerStep(
   def: StepDefinition,
   ctx: { inputs: Record<string, JsonValue>; steps: Record<string, JsonValue>; env?: NodeJS.ProcessEnv },
   client: OpencodeClient,
@@ -822,7 +991,13 @@ async function executeInnerStep(
       // Log masked command to protect secrets
       client.app.log(`> ${maskedCommand}`, "info");
       
-      const options: { cwd?: string; env?: NodeJS.ProcessEnv; timeout?: number } = {};
+      const options: { 
+        cwd?: string; 
+        env?: NodeJS.ProcessEnv; 
+        timeout?: number;
+        safe?: boolean;
+        args?: string[];
+      } = {};
       
       if (def.cwd) {
         options.cwd = interpolate(def.cwd, ctx);
@@ -840,27 +1015,50 @@ async function executeInnerStep(
       if (def.timeout) {
         options.timeout = def.timeout;
       }
+
+      // Safe mode: use spawn without shell to prevent injection
+      if (def.safe) {
+        options.safe = true;
+        if (!def.args) {
+          throw new Error("Safe mode requires 'args' to be specified as an array");
+        }
+        options.args = def.args.map(arg => interpolate(arg, ctx));
+      }
       
       try {
-        const { stdout, stderr } = await execAsync(command, options);
+        const result = await executeCommand(command, options);
+        
+        // Check for non-zero exit code and throw if failOnError is enabled
+        if (result.exitCode !== 0 && def.failOnError !== false) {
+          throw new Error(
+            `Command failed with exit code ${result.exitCode}: ${result.stderr || result.stdout}`
+          );
+        }
+        
         return {
-          stdout: stdout.trim(),
-          stderr: stderr.trim(),
-          exitCode: 0,
+          stdout: result.stdout.trim(),
+          stderr: result.stderr.trim(),
+          exitCode: result.exitCode,
         };
       } catch (error) {
-        const execError = error as { stdout?: string; stderr?: string; code?: number };
+        // Re-throw if this is our own error from exit code check above
+        if (error instanceof Error && error.message.startsWith("Command failed with exit code")) {
+          throw error;
+        }
+        
+        // Handle spawn/process errors (timeout, killed, etc.)
+        const execError = error as { stdout?: string; stderr?: string; code?: number; exitCode?: number };
         
         if (def.failOnError !== false) {
           throw new Error(
-            `Command failed with exit code ${execError.code}: ${execError.stderr || execError.stdout}`
+            `Command failed with exit code ${execError.code ?? execError.exitCode ?? 1}: ${execError.stderr || execError.stdout || (error as Error).message}`
           );
         }
         
         return {
           stdout: execError.stdout?.trim() || "",
           stderr: execError.stderr?.trim() || "",
-          exitCode: execError.code || 1,
+          exitCode: execError.code ?? execError.exitCode ?? 1,
         };
       }
     }
@@ -1024,6 +1222,24 @@ async function executeInnerStep(
       };
     }
     
+    case "eval": {
+      const timeout = def.scriptTimeout ?? DEFAULT_SCRIPT_TIMEOUT;
+      client.app.log(`Executing eval script (timeout: ${timeout}ms)`, "info");
+      
+      const scriptResult = await executeScript(def.script, ctx, timeout);
+      
+      if (scriptResult.workflow) {
+        // Dynamic workflow generation is not supported within iterators or cleanup blocks
+        // The workflow would need to be executed by the runner, which is not available here
+        throw new Error(
+          "Eval steps that generate dynamic workflows are not supported within iterators or cleanup blocks. " +
+          "Use eval steps that return simple values, or move the dynamic workflow generation to a top-level step."
+        );
+      }
+      
+      return scriptResult.result ?? null;
+    }
+    
     case "suspend":
       throw new Error("Suspend steps are not supported within iterators");
     
@@ -1036,14 +1252,28 @@ async function executeInnerStep(
 }
 
 /**
- * Creates a Mastra step that iterates over an array and executes a sub-step for each item.
+ * Creates a Mastra step that iterates over an array and executes a sub-step (or sequence of steps) for each item.
  * 
  * The iterator provides special context variables for each iteration:
- * - {{item}} - The current item being processed
- * - {{index}} - The zero-based index of the current item
- * - {{item.property}} - Access nested properties of the current item
+ * - {{inputs.item}} - The current item being processed
+ * - {{inputs.index}} - The zero-based index of the current item
+ * - {{inputs.item.property}} - Access nested properties of the current item
+ * 
+ * When using runSteps (sequence mode), each step can access outputs from previous
+ * steps in the sequence via {{steps.stepId.property}}.
  */
 export function createIteratorStep(def: IteratorStepDefinition, client: OpencodeClient) {
+  // Validate that exactly one of runStep or runSteps is provided
+  const hasRunStep = def.runStep !== undefined;
+  const hasRunSteps = def.runSteps !== undefined && def.runSteps.length > 0;
+  
+  if (!hasRunStep && !hasRunSteps) {
+    throw new Error(`Iterator step '${def.id}' must have either 'runStep' or 'runSteps'`);
+  }
+  if (hasRunStep && hasRunSteps) {
+    throw new Error(`Iterator step '${def.id}' cannot have both 'runStep' and 'runSteps' - use one or the other`);
+  }
+
   return createStep({
     id: def.id,
     description: def.description || `Iterate over ${def.items}`,
@@ -1091,37 +1321,255 @@ export function createIteratorStep(def: IteratorStepDefinition, client: Opencode
 
       const results: JsonValue[] = [];
 
+      // Get the steps to execute (either single runStep or array of runSteps)
+      // We've already validated that exactly one of these is defined
+      const stepsToRun = def.runSteps ? def.runSteps : (def.runStep ? [def.runStep] : []);
+
       for (let index = 0; index < items.length; index++) {
         const item = items[index];
         
         // Create context with item and index available for interpolation
-        // We inject these as special inputs that can be accessed via {{item}} and {{index}}
+        // We inject these as special inputs that can be accessed via {{inputs.item}} and {{inputs.index}}
         const iterationCtx = {
           inputs: {
             ...ctx.inputs,
             item,
             index,
           } as Record<string, JsonValue>,
-          steps: ctx.steps,
+          // Start with parent steps context, will accumulate results from sub-steps
+          steps: { ...ctx.steps } as Record<string, JsonValue>,
           env: ctx.env,
         };
 
-        // Create a copy of the runStep definition with a generated id if not provided
-        const stepDef: StepDefinition = {
-          ...def.runStep,
-          id: def.runStep.id || `${def.id}-iteration-${index}`,
-        } as StepDefinition;
-
         client.app.log(`[${index + 1}/${items.length}] Processing item`, "info");
 
-        // Execute the inner step with secretInputs for masking
-        const result = await executeInnerStep(stepDef, iterationCtx, client, secretInputs);
-        results.push(result);
+        // Execute each step in the sequence for this item
+        const iterationResults: Record<string, JsonValue> = {};
+        
+        for (let stepIndex = 0; stepIndex < stepsToRun.length; stepIndex++) {
+          const stepTemplate = stepsToRun[stepIndex];
+          
+          // Create a copy of the step definition with a generated id if not provided
+          const stepDef: StepDefinition = {
+            ...stepTemplate,
+            id: stepTemplate.id || `${def.id}-iter${index}-step${stepIndex}`,
+          } as StepDefinition;
+
+          if (stepsToRun.length > 1) {
+            client.app.log(`  Step ${stepIndex + 1}/${stepsToRun.length}: ${stepDef.id}`, "info");
+          }
+
+          // Execute the inner step with secretInputs for masking
+          const result = await executeInnerStep(stepDef, iterationCtx, client, secretInputs);
+          
+          // Store the result so subsequent steps can reference it
+          iterationResults[stepDef.id] = result;
+          iterationCtx.steps[stepDef.id] = result;
+        }
+
+        // For single step mode, push just the result; for multi-step mode, push all results
+        if (stepsToRun.length === 1) {
+          const singleStepId = stepsToRun[0].id || `${def.id}-iter${index}-step0`;
+          results.push(iterationResults[singleStepId]);
+        } else {
+          results.push(iterationResults);
+        }
       }
 
       return {
         results,
         count: items.length,
+      };
+    },
+  });
+}
+
+// =============================================================================
+// Eval Step Adapter
+// =============================================================================
+
+/**
+ * Output schema for Eval step
+ */
+const EvalOutputSchema = z.object({
+  result: JsonValueSchema.optional(),
+  workflow: z.unknown().optional(), // WorkflowDefinition validated separately
+  subWorkflowOutputs: z.record(z.unknown()).optional(),
+  skipped: z.boolean().optional(),
+});
+
+/** Default timeout for script execution (30 seconds) */
+const DEFAULT_SCRIPT_TIMEOUT = 30000;
+
+/**
+ * Creates a sandboxed context for script execution.
+ * The context provides read-only access to inputs, steps, and env.
+ */
+function createSandboxContext(
+  inputs: Record<string, JsonValue>,
+  steps: Record<string, JsonValue>,
+  env: NodeJS.ProcessEnv
+): Context {
+  // Create a frozen copy of env to prevent modification
+  const frozenEnv = Object.freeze({ ...env });
+  
+  return {
+    // Workflow context (read-only via frozen copies)
+    inputs: Object.freeze(JSON.parse(JSON.stringify(inputs))),
+    steps: Object.freeze(JSON.parse(JSON.stringify(steps))),
+    env: frozenEnv,
+    
+    // Safe built-ins
+    console: {
+      log: () => {}, // Silent by default, could be captured
+      warn: () => {},
+      error: () => {},
+    },
+    JSON,
+    Math,
+    Date,
+    Array,
+    Object,
+    String,
+    Number,
+    Boolean,
+    RegExp,
+    Map,
+    Set,
+    Promise,
+    parseInt,
+    parseFloat,
+    isNaN,
+    isFinite,
+    encodeURIComponent,
+    decodeURIComponent,
+    encodeURI,
+    decodeURI,
+    
+    // Blocked dangerous globals
+    require: undefined,
+    process: undefined,
+    global: undefined,
+    globalThis: undefined,
+    Buffer: undefined,
+    __dirname: undefined,
+    __filename: undefined,
+    module: undefined,
+    exports: undefined,
+    fetch: undefined, // Use http step instead
+    setTimeout: undefined,
+    setInterval: undefined,
+    setImmediate: undefined,
+  };
+}
+
+/**
+ * Execute a script in a sandboxed VM context.
+ * Returns the result of the script execution.
+ */
+async function executeScript(
+  script: string,
+  ctx: { inputs: Record<string, JsonValue>; steps: Record<string, JsonValue>; env?: NodeJS.ProcessEnv },
+  timeout: number
+): Promise<{ result?: JsonValue; workflow?: WorkflowDefinition }> {
+  const sandbox = createSandboxContext(ctx.inputs, ctx.steps, ctx.env || {});
+  
+  // Wrap the script in an async IIFE to support await and return statements
+  const wrappedScript = `
+    (async () => {
+      ${script}
+    })()
+  `;
+  
+  try {
+    const result = await Promise.race([
+      runInNewContext(wrappedScript, sandbox, {
+        timeout,
+        displayErrors: true,
+      }),
+      new Promise<never>((_, reject) => 
+        setTimeout(() => reject(new Error(`Script execution timed out after ${timeout}ms`)), timeout)
+      ),
+    ]);
+    
+    // Check if result is a workflow definition
+    if (result && typeof result === 'object' && 'workflow' in result) {
+      const workflowResult = result as { workflow: unknown };
+      // Validate the workflow definition
+      const validation = WorkflowDefinitionSchema.safeParse(workflowResult.workflow);
+      if (!validation.success) {
+        const errors = validation.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join(', ');
+        throw new Error(`Invalid workflow definition: ${errors}`);
+      }
+      return { workflow: validation.data as WorkflowDefinition };
+    }
+    
+    return { result: result as JsonValue };
+  } catch (error) {
+    if (error instanceof Error) {
+      throw new Error(`Script execution failed: ${error.message}`);
+    }
+    throw error;
+  }
+}
+
+/**
+ * Creates a Mastra step that executes JavaScript code in a sandboxed environment.
+ * 
+ * The script can:
+ * 1. Return a value directly (stored in `result`)
+ * 2. Return `{ workflow: WorkflowDefinition }` to trigger dynamic workflow execution
+ * 
+ * This enables "Agentic Planning" - the ability for an agent to decide at runtime
+ * how to solve a problem by generating and executing a workflow dynamically.
+ */
+export function createEvalStep(def: EvalStepDefinition, client: OpencodeClient) {
+  return createStep({
+    id: def.id,
+    description: def.description || "Dynamic script evaluation",
+    inputSchema: StepInputSchema,
+    outputSchema: EvalOutputSchema,
+    execute: async ({ inputData }) => {
+      const data = inputData as StepInput;
+
+      // IDEMPOTENCY CHECK: Skip if this step was already executed (hydration scenario)
+      if (data.steps?.[def.id]) {
+        client.app.log(`Skipping already-completed step: ${def.id}`, "info");
+        return data.steps[def.id] as z.infer<typeof EvalOutputSchema>;
+      }
+
+      const ctx = {
+        inputs: data.inputs || {},
+        steps: data.steps || {},
+        env: process.env,
+      };
+
+      // Check condition before execution
+      if (def.condition) {
+        const evaluated = interpolate(def.condition, ctx);
+        if (evaluated === "false" || evaluated === "0" || evaluated === "") {
+          return {
+            skipped: true,
+          };
+        }
+      }
+
+      const timeout = def.scriptTimeout ?? DEFAULT_SCRIPT_TIMEOUT;
+      client.app.log(`Executing eval script (timeout: ${timeout}ms)`, "info");
+
+      const scriptResult = await executeScript(def.script, ctx, timeout);
+
+      if (scriptResult.workflow) {
+        client.app.log(`Eval step generated dynamic workflow: ${scriptResult.workflow.id}`, "info");
+        // Return the workflow for the runner to execute
+        // The runner will handle executing the sub-workflow
+        return {
+          workflow: scriptResult.workflow,
+        };
+      }
+
+      return {
+        result: scriptResult.result,
       };
     },
   });

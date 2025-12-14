@@ -1,0 +1,52 @@
+$schema: https://raw.githubusercontent.com/mark-hingston/opencode-workflows/main/schemas/workflow.schema.json
+id: deploy-prod-yaml
+name: Deploy to Production
+description: Deploys the application to production with tests and approval
+version: 1.0.0
+tags:
+  - deployment
+  - production
+
+inputs:
+  version: string
+
+steps:
+  - id: check-git
+    type: shell
+    description: Ensure git working directory is clean
+    command: git status --porcelain
+
+  - id: run-tests
+    type: shell
+    description: Run the test suite
+    after: [check-git]
+    command: npm test
+
+  - id: run-build
+    type: shell
+    description: Build the application
+    after: [run-tests]
+    command: npm run build
+
+  - id: ask-approval
+    type: suspend
+    description: Wait for user to approve deployment
+    after: [run-build]
+    message: |
+      Tests passed and build succeeded.
+      Ready to deploy version {{inputs.version}}.
+      Resume to continue.
+
+  - id: deploy-script
+    type: shell
+    description: Deploy to production
+    after: [ask-approval]
+    command: npm run deploy -- --tag {{inputs.version}}
+
+  - id: notify-complete
+    type: agent
+    description: Generate completion message
+    after: [deploy-script]
+    prompt: |
+      Generate a brief deployment success message for version {{inputs.version}}.
+      Be concise and professional.

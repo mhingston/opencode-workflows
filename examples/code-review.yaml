@@ -1,0 +1,92 @@
+$schema: https://raw.githubusercontent.com/mark-hingston/opencode-workflows/main/schemas/workflow.schema.json
+id: code-review-yaml
+name: Multi-Agent Code Review (YAML)
+description: Parallel expert code review with synthesis and optional auto-fix
+version: 1.0.0
+tags:
+  - review
+  - agents
+  - quality
+
+inputs:
+  file: string
+
+steps:
+  - id: read_file
+    type: file
+    description: Read the source file
+    action: read
+    path: "{{inputs.file}}"
+
+  - id: security_review
+    type: agent
+    description: Security vulnerability analysis
+    agent: security-reviewer
+    after: [read_file]
+    # Multi-line prompts are much cleaner in YAML!
+    prompt: |
+      Review this code for security issues:
+
+      {{steps.read_file.content}}
+
+  - id: perf_review
+    type: agent
+    description: Performance analysis
+    agent: performance-reviewer
+    after: [read_file]
+    prompt: |
+      Review this code for performance issues:
+
+      {{steps.read_file.content}}
+
+  - id: quality_review
+    type: agent
+    description: Code quality analysis
+    agent: quality-reviewer
+    after: [read_file]
+    prompt: |
+      Review this code for quality issues:
+
+      {{steps.read_file.content}}
+
+  - id: synthesize
+    type: agent
+    description: Synthesize reviews into prioritized action items
+    agent: tech-lead
+    after: [security_review, perf_review, quality_review]
+    prompt: |
+      Combine these code reviews into a prioritized report:
+
+      ## Security Review
+      {{steps.security_review.response}}
+
+      ## Performance Review
+      {{steps.perf_review.response}}
+
+      ## Quality Review
+      {{steps.quality_review.response}}
+
+  - id: approve_fixes
+    type: suspend
+    description: Human approval gate before generating fixes
+    after: [synthesize]
+    message: |
+      Code review complete for {{inputs.file}}:
+
+      {{steps.synthesize.response}}
+
+      Resume to generate auto-fix suggestions.
+
+  - id: generate_fixes
+    type: agent
+    description: Generate fixed code
+    agent: code-fixer
+    after: [approve_fixes]
+    prompt: |
+      Fix the critical and high severity issues in this code:
+
+      Original code:
+      {{steps.read_file.content}}
+
+      Issues to fix:
+      {{steps.synthesize.response}}

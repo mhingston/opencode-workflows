@@ -1,0 +1,19 @@
+$schema: https://raw.githubusercontent.com/mark-hingston/opencode-workflows/main/schemas/workflow.schema.json
+id: hello-world-yaml
+name: Hello World Workflow
+description: A simple test workflow that echoes a greeting
+
+inputs:
+  name: string
+
+steps:
+  - id: greet
+    type: shell
+    description: Echo a greeting
+    command: echo 'Hello, {{inputs.name}}!'
+
+  - id: timestamp
+    type: shell
+    description: Show current time
+    after: [greet]
+    command: date

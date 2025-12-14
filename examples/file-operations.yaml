@@ -1,0 +1,59 @@
+$schema: https://raw.githubusercontent.com/mark-hingston/opencode-workflows/main/schemas/workflow.schema.json
+id: file-operations-yaml
+name: File Operations Example
+description: Demonstrates file step for reading, writing, and processing files
+version: 1.0.0
+tags:
+  - file
+  - data-processing
+
+inputs:
+  inputFile: string
+  outputDir: string
+
+steps:
+  - id: read-input
+    type: file
+    description: Read the input file
+    action: read
+    path: "{{inputs.inputFile}}"
+
+  - id: analyze-content
+    type: agent
+    description: Analyze file content with AI
+    after: [read-input]
+    prompt: |
+      Analyze this file content and provide a JSON summary with keys:
+      - lineCount
+      - wordCount
+      - mainTopics (array of strings)
+
+      Content:
+
+      {{steps.read-input.content}}
+
+  - id: write-analysis
+    type: file
+    description: Write analysis to JSON file
+    after: [analyze-content]
+    action: write
+    path: "{{inputs.outputDir}}/analysis.json"
+    content:
+      source: "{{inputs.inputFile}}"
+      analysis: "{{steps.analyze-content.response}}"
+      analyzedAt: "{{run.startedAt}}"
+
+  - id: create-backup
+    type: shell
+    description: Create dated backup of input file
+    after: [read-input]
+    command: cp {{inputs.inputFile}} {{inputs.outputDir}}/backup_$(date +%Y%m%d).txt
+
+  - id: summarize
+    type: agent
+    description: Summarize operations
+    after: [write-analysis, create-backup]
+    prompt: |
+      The file {{inputs.inputFile}} was analyzed and results written to {{inputs.outputDir}}/analysis.json.
+      A backup was also created.
+      Provide a brief confirmation message.

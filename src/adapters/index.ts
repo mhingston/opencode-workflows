@@ -7,7 +7,9 @@ export {
   createHttpStep,
   createFileStep,
   createIteratorStep,
+  createEvalStep,
   interpolateObject,
+  executeInnerStep,
 } from "./steps.js";
 
 export {

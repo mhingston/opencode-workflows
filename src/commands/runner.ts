@@ -1,8 +1,18 @@
 import { randomUUID } from "node:crypto";
 import { MissingInputsError } from "../types.js";
-import type { WorkflowRun, Logger, WorkflowInputs, JsonValue, StepOutput, StepResult } from "../types.js";
+import type { 
+  WorkflowRun, 
+  Logger, 
+  WorkflowInputs, 
+  JsonValue, 
+  StepOutput, 
+  StepResult,
+  StepDefinition,
+  OpencodeClient,
+} from "../types.js";
 import type { WorkflowFactory, WorkflowFactoryResult } from "../factory/index.js";
 import type { WorkflowStorage } from "../storage/index.js";
+import { executeInnerStep } from "../adapters/index.js";
 
 /**
  * Configuration options for WorkflowRunner
@@ -207,6 +217,78 @@ export class WorkflowRunner {
   }
 
   /**
+   * Execute cleanup steps (onFailure or finally blocks).
+   * These are executed outside the main Mastra workflow engine.
+   * 
+   * @param steps - The cleanup step definitions to execute
+   * @param run - The current workflow run (for context)
+   * @param compiled - The compiled workflow result
+   * @param errorInfo - Optional error information if this is an onFailure block
+   */
+  private async executeCleanupSteps(
+    steps: StepDefinition[],
+    run: WorkflowRun,
+    compiled: WorkflowFactoryResult,
+    errorInfo?: { message: string; stepId?: string }
+  ): Promise<void> {
+    const client = this.factory.getClient();
+    
+    // Build context from the run's current state
+    const ctx = {
+      inputs: {
+        ...run.inputs,
+        // Add error info if available (for onFailure blocks)
+        ...(errorInfo ? {
+          error: {
+            message: errorInfo.message,
+            stepId: errorInfo.stepId,
+          }
+        } : {}),
+      } as Record<string, JsonValue>,
+      steps: extractStepOutputs(run.stepResults) as Record<string, JsonValue>,
+      env: process.env,
+    };
+
+    for (const stepDef of steps) {
+      try {
+        this.log.info(`Executing cleanup step: ${stepDef.id}`);
+        
+        const result = await executeInnerStep(
+          stepDef,
+          ctx,
+          client,
+          compiled.secrets || []
+        );
+
+        // Store the result for subsequent cleanup steps to reference
+        ctx.steps[stepDef.id] = result;
+        
+        // Save to run results with a "cleanup:" prefix to distinguish from main steps
+        run.stepResults[`cleanup:${stepDef.id}`] = {
+          stepId: `cleanup:${stepDef.id}`,
+          status: "success",
+          output: result as StepOutput,
+          startedAt: new Date(),
+          completedAt: new Date(),
+        };
+        
+        this.log.info(`Cleanup step ${stepDef.id} completed`);
+      } catch (error) {
+        // Log but don't throw - cleanup steps should not mask the original error
+        this.log.error(`Cleanup step ${stepDef.id} failed: ${error}`);
+        
+        run.stepResults[`cleanup:${stepDef.id}`] = {
+          stepId: `cleanup:${stepDef.id}`,
+          status: "failed",
+          error: String(error),
+          startedAt: new Date(),
+          completedAt: new Date(),
+        };
+      }
+    }
+  }
+
+  /**
    * Start a new workflow run
    */
   async run(
@@ -243,7 +325,10 @@ export class WorkflowRunner {
 
     this.runs.set(runId, run);
     await this.persistRun(run);
-    this.log.info(`Starting workflow ${workflowId} with run ID: ${runId}`);
+    this.log.info(`Starting workflow ${workflowId} with run ID: ${runId}`, {
+      workflowId,
+      runId,
+    });
 
     // Execute in background
     const promise = this.executeWorkflow(runId, compiled, inputs);
@@ -258,7 +343,7 @@ export class WorkflowRunner {
   }
 
   /**
-   * Execute the workflow
+   * Execute the workflow with proper cleanup (onFailure/finally) handling
    */
   private async executeWorkflow(
     runId: string,
@@ -268,10 +353,16 @@ export class WorkflowRunner {
     const run = this.runs.get(runId);
     if (!run) return;
 
+    let workflowError: Error | undefined;
+    let failedStepId: string | undefined;
+
     try {
       run.status = "running";
       await this.persistRun(run);
-      this.log.info(`Executing workflow: ${compiled.id}`);
+      this.log.info(`Executing workflow: ${compiled.id}`, {
+        workflowId: compiled.id,
+        runId,
+      });
 
       // Create a run instance
       const workflow = compiled.workflow as MastraWorkflow;
@@ -300,7 +391,7 @@ export class WorkflowRunner {
         timeout.clear();
       }
 
-      // Check for suspend
+      // Check for suspend - no cleanup needed, workflow may resume later
       if (result.status === "suspended") {
         run.status = "suspended";
         run.suspendedData = result as JsonValue;
@@ -314,27 +405,71 @@ export class WorkflowRunner {
         // Save completed step results for potential hydration after restart
         this.saveStepResults(run, result.steps || {});
         await this.persistRun(run);
-        this.log.info(`Workflow ${compiled.id} suspended at step: ${run.currentStepId}`);
+        this.log.info(`Workflow ${compiled.id} suspended at step: ${run.currentStepId}`, {
+          workflowId: compiled.id,
+          runId,
+          stepId: run.currentStepId,
+        });
         return;
       }
 
       // Save all step results
       this.saveStepResults(run, result.steps || {});
       
-      // Update final status
+      // Main workflow completed successfully
       run.status = "completed";
       run.completedAt = new Date();
-      await this.persistRun(run);
-      this.cleanupCompletedRuns();
-      this.log.info(`Workflow ${compiled.id} completed successfully`);
+      this.log.info(`Workflow ${compiled.id} completed successfully`, {
+        workflowId: compiled.id,
+        runId,
+        durationMs: run.completedAt.getTime() - run.startedAt.getTime(),
+      });
+
     } catch (error) {
+      // Capture the error for onFailure block
+      workflowError = error as Error;
+      
+      // Try to find which step failed
+      const failedStep = Object.entries(run.stepResults).find(
+        ([, result]) => result.status === "failed"
+      );
+      failedStepId = failedStep?.[0];
+      
       run.status = "failed";
       run.error = String(error);
       run.completedAt = new Date();
-      await this.persistRun(run);
-      this.cleanupCompletedRuns();
-      this.log.error(`Workflow ${compiled.id} failed: ${error}`);
+      this.log.error(`Workflow ${compiled.id} failed: ${error}`, {
+        workflowId: compiled.id,
+        runId,
+        metadata: { error: String(error), failedStepId: failedStepId ?? null },
+      });
     }
+
+    // Execute onFailure steps if workflow failed and onFailure is defined
+    if (workflowError && compiled.onFailureSteps && compiled.onFailureSteps.length > 0) {
+      this.log.info(`Executing onFailure block (${compiled.onFailureSteps.length} steps)`);
+      await this.executeCleanupSteps(
+        compiled.onFailureSteps,
+        run,
+        compiled,
+        { message: workflowError.message, stepId: failedStepId }
+      );
+    }
+
+    // Execute finally steps (always, regardless of success/failure)
+    if (compiled.finallySteps && compiled.finallySteps.length > 0) {
+      this.log.info(`Executing finally block (${compiled.finallySteps.length} steps)`);
+      await this.executeCleanupSteps(
+        compiled.finallySteps,
+        run,
+        compiled,
+        workflowError ? { message: workflowError.message, stepId: failedStepId } : undefined
+      );
+    }
+
+    // Persist final state and cleanup
+    await this.persistRun(run);
+    this.cleanupCompletedRuns();
   }
 
   /**
@@ -382,6 +517,9 @@ export class WorkflowRunner {
       this.log.debug(`Recreated Mastra run instance for ${runId}, will hydrate with previous step results`);
     }
 
+    let workflowError: Error | undefined;
+    let failedStepId: string | undefined;
+
     try {
       run.status = "running";
       await this.persistRun(run);
@@ -420,7 +558,7 @@ export class WorkflowRunner {
       // Save step results from this execution
       this.saveStepResults(run, result.steps || {});
 
-      // Check if suspended again
+      // Check if suspended again - no cleanup needed
       if (result.status === "suspended") {
         run.status = "suspended";
         run.suspendedData = result as JsonValue;
@@ -437,17 +575,47 @@ export class WorkflowRunner {
 
       run.status = "completed";
       run.completedAt = new Date();
-      await this.persistRun(run);
-      this.cleanupCompletedRuns();
       this.log.info(`Workflow ${run.workflowId} completed after resume`);
     } catch (error) {
+      workflowError = error as Error;
+      
+      // Try to find which step failed
+      const failedStep = Object.entries(run.stepResults).find(
+        ([, result]) => result.status === "failed"
+      );
+      failedStepId = failedStep?.[0];
+      
       run.status = "failed";
       run.error = String(error);
       run.completedAt = new Date();
-      await this.persistRun(run);
-      this.cleanupCompletedRuns();
       this.log.error(`Workflow ${run.workflowId} failed after resume: ${error}`);
     }
+
+    // Execute onFailure steps if workflow failed and onFailure is defined
+    if (workflowError && compiled.onFailureSteps && compiled.onFailureSteps.length > 0) {
+      this.log.info(`Executing onFailure block (${compiled.onFailureSteps.length} steps)`);
+      await this.executeCleanupSteps(
+        compiled.onFailureSteps,
+        run,
+        compiled,
+        { message: workflowError.message, stepId: failedStepId }
+      );
+    }
+
+    // Execute finally steps (always, regardless of success/failure)
+    if (compiled.finallySteps && compiled.finallySteps.length > 0) {
+      this.log.info(`Executing finally block (${compiled.finallySteps.length} steps)`);
+      await this.executeCleanupSteps(
+        compiled.finallySteps,
+        run,
+        compiled,
+        workflowError ? { message: workflowError.message, stepId: failedStepId } : undefined
+      );
+    }
+
+    // Persist final state and cleanup
+    await this.persistRun(run);
+    this.cleanupCompletedRuns();
   }
 
   /**

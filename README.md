@@ -4,7 +4,8 @@ Workflow automation plugin for OpenCode using the Mastra workflow engine. Define
 
 ## Features
 
-- **Deterministic Automation**: Define rigid, multi-step processes (DAGs) in JSON
+- **Deterministic Automation**: Define rigid, multi-step processes (DAGs) in JSON, YAML, or TypeScript
+- **YAML Support**: Multi-line prompts and shell scripts are clean and readable
 - **Agentic Triggering**: Agents can call workflows as tools
 - **Hybrid Execution**: Mix shell commands, API calls, and LLM prompts
 - **Human-in-the-Loop**: Suspend workflows for human approval
@@ -30,6 +31,39 @@ The plugin uses sensible defaults but can be configured via environment variable
 | `WORKFLOW_DB_PATH` | `.opencode/data/workflows.db` | SQLite database path for persisting workflow runs |
 | `WORKFLOW_TIMEOUT` | `300000` (5 min) | Global timeout for workflow execution in milliseconds |
 | `WORKFLOW_VERBOSE` | `false` | Enable verbose debug logging |
+
+### Structured Logging
+
+The plugin supports structured logging for observability and log aggregation systems. Logs include contextual information like `workflowId`, `runId`, and `stepId`.
+
+**Programmatic Configuration:**
+
+```typescript
+import { createLogger } from "opencode-workflows/loader";
+
+// JSON format for log aggregation (e.g., DataDog, Splunk, CloudWatch)
+const logger = createLogger({ format: "json", verbose: true });
+
+// Custom output handler
+const logger = createLogger({
+  output: (entry) => {
+    // entry: { timestamp, level, message, workflowId?, runId?, stepId?, durationMs?, metadata? }
+    myLogAggregator.send(entry);
+  }
+});
+```
+
+**JSON Log Format:**
+
+```json
+{"timestamp":"2024-01-15T10:30:00.000Z","level":"info","message":"Workflow deploy-prod completed successfully","workflowId":"deploy-prod","runId":"abc-123","durationMs":45000}
+```
+
+**Text Log Format (default):**
+
+```
+[workflow] [INFO] [workflow=deploy-prod run=abc-1234 step=build duration=5000ms] Step completed
+```
 
 ### Persistence
 
@@ -149,7 +183,135 @@ And in the database, the `apiToken` and `webhookSecret` values are stored encryp
 
 ## Workflow Definitions
 
-Create workflow definitions in `.opencode/workflows/` as JSON or JSONC files. JSONC files support comments for better documentation.
+Create workflow definitions in `.opencode/workflows/` as JSON, JSONC, YAML, or TypeScript files. JSONC files support comments, while YAML files offer the best experience for multi-line content like prompts and shell scripts.
+
+### Why YAML?
+
+YAML is the recommended format for workflows that contain **LLM prompts** or **multi-line shell scripts**. Key benefits:
+
+1. **Multi-line Strings**: Use the `|` block scalar operator for clean, readable prompts
+2. **Native Comments**: No special syntax needed - just use `#`
+3. **Cleaner Syntax**: No commas or quotes required for simple values
+
+**Comparison:**
+
+*JSON (hard to read):*
+```json
+"prompt": "Review this code.\n\nLook for:\n1. Security bugs\n2. Performance issues"
+```
+
+*YAML (much cleaner):*
+```yaml
+prompt: |
+  Review this code.
+
+  Look for:
+  1. Security bugs
+  2. Performance issues
+```
+
+### YAML Workflow Example
+
+```yaml
+# .opencode/workflows/code-review.yaml
+$schema: https://raw.githubusercontent.com/mark-hingston/opencode-workflows/main/schemas/workflow.schema.json
+id: code-review
+name: Multi-Agent Code Review
+description: Parallel expert code review with synthesis
+
+inputs:
+  file: string
+
+steps:
+  - id: read_file
+    type: file
+    description: Read the source file
+    action: read
+    path: "{{inputs.file}}"
+
+  - id: security_review
+    type: agent
+    description: Security vulnerability analysis
+    agent: security-reviewer
+    after: [read_file]
+    # Multi-line prompts are clean and readable!
+    prompt: |
+      Review this code for security issues:
+
+      {{steps.read_file.content}}
+
+  - id: synthesize
+    type: agent
+    description: Combine reviews into a report
+    agent: tech-lead
+    after: [security_review]
+    prompt: |
+      Combine these reviews into a prioritized report:
+
+      ## Security Review
+      {{steps.security_review.response}}
+```
+
+### TypeScript Workflow Definitions
+
+For type safety, code reuse, and dynamic configuration, you can define workflows in TypeScript:
+
+```typescript
+// .opencode/workflows/deploy.ts
+import type { WorkflowDefinition } from "opencode-workflows";
+
+const workflow: WorkflowDefinition = {
+  id: "deploy-prod",
+  description: "Deploy to production with type safety",
+  inputs: {
+    version: "string",
+    environment: "string",
+  },
+  steps: [
+    {
+      id: "build",
+      type: "shell",
+      command: "npm run build",
+    },
+    {
+      id: "deploy",
+      type: "shell",
+      command: "deploy --version={{inputs.version}} --env={{inputs.environment}}",
+      after: ["build"],
+    },
+  ],
+};
+
+export default workflow;
+```
+
+**Dynamic Workflow Generation:**
+
+Export a function for workflows that need runtime configuration:
+
+```typescript
+// .opencode/workflows/multi-deploy.ts
+import type { WorkflowDefinition } from "opencode-workflows";
+
+export default async function(): Promise<WorkflowDefinition> {
+  // Could fetch configuration from an API or file
+  const regions = ["us-east-1", "eu-west-1", "ap-south-1"];
+  
+  return {
+    id: "multi-region-deploy",
+    steps: regions.map((region, index) => ({
+      id: `deploy-${region}`,
+      type: "shell" as const,
+      command: `deploy --region ${region}`,
+      after: index > 0 ? [`deploy-${regions[index - 1]}`] : undefined,
+    })),
+  };
+}
+```
+
+**Supported File Extensions:** `.ts`, `.js`, `.mts`, `.mjs`
+
+TypeScript files are compiled at runtime using [jiti](https://github.com/unjs/jiti), so no build step is required.
 
 ### JSON Schema
 
@@ -431,6 +593,56 @@ Iterator step output includes:
 **Limitations:**
 - Nested iterators are not supported
 - Suspend steps are not supported within iterators
+
+### Eval Step
+Execute JavaScript code in a sandboxed environment for dynamic logic and workflow generation:
+
+```json
+{
+  "id": "calculate-shards",
+  "type": "eval",
+  "script": "return inputs.items.filter(x => x.enabled).map(x => x.id);",
+  "scriptTimeout": 5000
+}
+```
+
+The script has access to:
+- `inputs` - Workflow input parameters
+- `steps` - Previous step outputs
+- `env` - Environment variables (read-only)
+- Safe built-ins: `JSON`, `Math`, `Date`, `Array`, `Object`, `String`, `Number`, `Boolean`, `RegExp`, `Map`, `Set`, `Promise`
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `script` | `string` | required | JavaScript code to execute |
+| `scriptTimeout` | `number` | `30000` | Script execution timeout in milliseconds |
+
+**Dynamic Workflow Generation (Agentic Planning):**
+
+Eval steps can generate workflows dynamically at runtime, enabling "agentic planning" where an agent decides *how* to solve a problem:
+
+```json
+{
+  "id": "plan-deployment",
+  "type": "eval",
+  "script": "return { workflow: { id: 'dynamic-deploy', steps: inputs.services.map(s => ({ id: `deploy-${s}`, type: 'shell', command: `deploy ${s}` })) } };"
+}
+```
+
+When the script returns `{ workflow: WorkflowDefinition }`, the generated workflow is validated and executed as a sub-workflow.
+
+**Security:**
+
+The eval sandbox blocks access to:
+- `require`, `process`, `global`, `Buffer` (Node.js internals)
+- `fetch`, `setTimeout`, `setInterval` (async operations - use http/wait steps instead)
+- File system operations (use file steps instead)
+
+Inputs and steps are frozen (immutable) within the script.
+
+**Limitations:**
+- Eval steps that generate workflows cannot be used within iterators or cleanup blocks
+- The sandbox does not support `import` statements
 
 ## Commands
 

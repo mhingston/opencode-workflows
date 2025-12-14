@@ -1,0 +1,37 @@
+$schema: https://raw.githubusercontent.com/mark-hingston/opencode-workflows/main/schemas/workflow.schema.json
+id: batch-lint-yaml
+name: Batch Lint Files
+description: Demonstrates the iterator step by linting multiple files found by a pattern
+
+inputs:
+  pattern: string
+
+steps:
+  - id: find-files
+    type: shell
+    description: Find files matching the pattern
+    command: find . -name '{{inputs.pattern}}' -type f | head -20
+
+  - id: parse-files
+    type: agent
+    description: Convert file list to JSON array
+    after: [find-files]
+    prompt: |
+      Parse this newline-separated list of file paths into a JSON array of strings.
+      Return ONLY the JSON array, no explanation:
+
+      {{steps.find-files.stdout}}
+
+  - id: lint-each-file
+    type: iterator
+    description: Run linter on each found file
+    after: [parse-files]
+    items: "{{steps.parse-files.response}}"
+    runStep:
+      type: shell
+      command: echo 'Linting {{inputs.item}}...' && cat {{inputs.item}} | head -5
+
+  - id: summary
+    type: shell
+    after: [lint-each-file]
+    command: echo 'Successfully processed {{steps.lint-each-file.count}} files'

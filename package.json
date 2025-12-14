@@ -34,12 +34,16 @@
     "@mastra/core": "^0.24.0",
     "@mastra/libsql": "^0.16.0",
     "@opencode-ai/plugin": "^1.0.147",
+    "jiti": "^2.6.1",
+    "js-yaml": "^4.1.1",
     "minimatch": "^10.1.1",
     "node-cron": "^4.2.1",
     "strip-json-comments": "^5.0.3",
+    "tree-kill": "^1.2.2",
     "zod": "^3.25.0"
   },
   "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
     "@types/minimatch": "^5.1.2",
     "@types/node": "^22.0.0",
     "@types/node-cron": "^3.0.11",
